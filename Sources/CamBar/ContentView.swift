@@ -3,10 +3,10 @@ import SwiftUI
 struct ContentView: View {
     @ObservedObject var frameProvider: CameraFrameProvider
     let onReload: () -> Void
-    let onOpenConfig: () -> Void
     let onOpenCache: () -> Void
     let onOpenWindow: () -> Void
     let onQuit: () -> Void
+    @State private var showSettings = false
 
     var body: some View {
         VStack(spacing: 10) {
@@ -48,12 +48,15 @@ struct ContentView: View {
             HStack {
                 Button("Reload") { onReload() }
                 Button("Open Window") { onOpenWindow() }
-                Button("Open Config") { onOpenConfig() }
+                Button("Settings") { showSettings = true }
                 Button("Open Cache") { onOpenCache() }
                 Spacer()
                 Button("Quit") { onQuit() }
             }
         }
         .padding(12)
+        .sheet(isPresented: $showSettings) {
+            SettingsView(onApply: onReload)
+        }
     }
 }

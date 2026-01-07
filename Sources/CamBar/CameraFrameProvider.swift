@@ -13,13 +13,13 @@ final class CameraFrameProvider: ObservableObject, @unchecked Sendable {
     @Published private(set) var ffmpegPath: String?
     @Published private(set) var streamURL: URL?
 
-    private let configURL: URL
+    private let camsnapConfigURL: URL
     private let hlsFolderURL: URL
     private let playlistURL: URL
-    private var config: CamBarConfig
     private var cameraConfig: CameraConfig?
     private let workerQueue = DispatchQueue(label: "CamBar.stream.worker")
     private var ffmpegProcess: Process?
+    private var logHandle: FileHandle?
     private var readinessTimer: DispatchSourceTimer?
     private var isStarting = false
     private let server: HLSServer
@@ -29,14 +29,13 @@ final class CameraFrameProvider: ObservableObject, @unchecked Sendable {
     private var stallTicks = 0
 
     init(autoStart: Bool = true) {
-        self.configURL = Self.defaultConfigURL()
+        self.camsnapConfigURL = Self.defaultConfigURL()
         self.hlsFolderURL = Self.makeHLSFolderURL()
         self.playlistURL = hlsFolderURL.appendingPathComponent("master.m3u8")
-        self.config = Self.loadConfig()
-        self.cameraName = Self.loadCameraName(from: configURL) ?? "hikvision"
-        self.camsnapPath = Self.resolveExecutablePath("camsnap", overridePath: config.camsnapPath)
-        self.ffmpegPath = Self.resolveExecutablePath("ffmpeg", overridePath: config.ffmpegPath)
-        self.cameraConfig = Self.loadCameraConfig(from: configURL)
+        self.cameraName = Self.loadCameraName(from: camsnapConfigURL) ?? "hikvision"
+        self.camsnapPath = Self.resolveExecutablePath("camsnap", overridePath: Self.userDefaultString("camsnapPath"))
+        self.ffmpegPath = Self.resolveExecutablePath("ffmpeg", overridePath: Self.userDefaultString("ffmpegPath"))
+        self.cameraConfig = Self.loadCameraConfig(from: camsnapConfigURL)
         let serverFile = hlsFolderURL.appendingPathComponent("server.txt")
         self.server = HLSServer(root: hlsFolderURL, onReady: { url in
             try? Data(url.absoluteString.utf8).write(to: serverFile, options: .atomic)
@@ -64,37 +63,46 @@ final class CameraFrameProvider: ObservableObject, @unchecked Sendable {
         }
     }
 
-    static func openConfig() {
-        let url = defaultConfigURL()
-        guard FileManager.default.fileExists(atPath: url.path) else { return }
-        NSWorkspace.shared.open(url)
-    }
-
     static func openCacheFolder() {
         let folder = makeHLSFolderURL()
         NSWorkspace.shared.open(folder)
     }
 
+    private func refreshInputs() {
+        cameraConfig = Self.loadCameraConfig(from: camsnapConfigURL)
+        cameraName = Self.loadCameraName(from: camsnapConfigURL) ?? "hikvision"
+        camsnapPath = Self.resolveExecutablePath("camsnap", overridePath: Self.userDefaultString("camsnapPath"))
+        ffmpegPath = Self.resolveExecutablePath("ffmpeg", overridePath: Self.userDefaultString("ffmpegPath"))
+    }
+
     private func start() {
-        guard FileManager.default.fileExists(atPath: configURL.path) else {
-            publishError("Missing camsnap config at \(configURL.path).")
-            return
-        }
-        guard let cameraConfig else {
-            publishError("No cameras found in camsnap config.")
-            return
+        refreshInputs()
+        let overrideRTSP = Self.loadRtspOverride()
+        if overrideRTSP == nil {
+            guard FileManager.default.fileExists(atPath: camsnapConfigURL.path) else {
+                publishError("Missing camsnap config at \(camsnapConfigURL.path). Set RTSP URL in Settings or install camsnap.")
+                return
+            }
+            guard cameraConfig != nil else {
+                publishError("No cameras found in camsnap config.")
+                return
+            }
         }
         guard let ffmpegPath else {
             publishError("ffmpeg not found. Use local nix build or set FFMPEG_PATH.")
             return
         }
-        guard let rtspURL = Self.buildRtspURL(from: cameraConfig) else {
-            publishError("Unable to build RTSP URL from camsnap config.")
+        let rtspURL = overrideRTSP ?? cameraConfig.flatMap { Self.buildRtspURL(from: $0) }
+        guard let rtspURL else {
+            publishError("Unable to determine RTSP URL. Set it in Settings or check camsnap config.")
             return
+        }
+        if overrideRTSP != nil {
+            cameraName = Self.displayName(from: rtspURL) ?? "custom"
         }
         clearHLSFolder()
         server.start()
-        startStream(ffmpegPath: ffmpegPath, rtspURL: rtspURL, transport: cameraConfig.rtspTransport)
+        startStream(ffmpegPath: ffmpegPath, rtspURL: rtspURL, transport: cameraConfig?.rtspTransport)
     }
 
     private func restartStream() {
@@ -119,6 +127,10 @@ final class CameraFrameProvider: ObservableObject, @unchecked Sendable {
             process.waitUntilExit()
         }
         ffmpegProcess = nil
+        if let logHandle {
+            try? logHandle.close()
+            self.logHandle = nil
+        }
         server.stop()
         DispatchQueue.main.async {
             self.player = nil
@@ -181,14 +193,23 @@ final class CameraFrameProvider: ObservableObject, @unchecked Sendable {
         try? Data(debug.utf8).write(to: debugURL, options: .atomic)
         try? Data(rtspURL.utf8).write(to: rtspURLFile, options: .atomic)
         FileManager.default.createFile(atPath: logURL.path, contents: nil)
+        if let logHandle {
+            try? logHandle.close()
+            self.logHandle = nil
+        }
         if let handle = try? FileHandle(forWritingTo: logURL) {
             handle.seekToEndOfFile()
             process.standardOutput = handle
             process.standardError = handle
+            logHandle = handle
         }
 
         process.terminationHandler = { [weak self] proc in
             guard let self else { return }
+            if let logHandle = self.logHandle {
+                try? logHandle.close()
+                self.logHandle = nil
+            }
             if proc.terminationStatus != 0 {
                 self.publishError("ffmpeg exited with code \(proc.terminationStatus).")
             }
@@ -366,7 +387,7 @@ final class CameraFrameProvider: ObservableObject, @unchecked Sendable {
     }
 
     private static func searchPaths() -> [String] {
-        let extraPaths = [
+        var extraPaths = [
             "/opt/homebrew/bin",
             "/usr/local/bin",
             "/run/current-system/sw/bin",
@@ -376,6 +397,10 @@ final class CameraFrameProvider: ObservableObject, @unchecked Sendable {
             "/usr/bin",
             "/bin"
         ]
+        if let resourceURL = Bundle.main.resourceURL {
+            let bundled = resourceURL.appendingPathComponent("bin").path
+            extraPaths.insert(bundled, at: 0)
+        }
         let inherited = (ProcessInfo.processInfo.environment["PATH"] ?? "")
             .split(separator: ":", omittingEmptySubsequences: true)
             .map(String.init)
@@ -389,25 +414,26 @@ final class CameraFrameProvider: ObservableObject, @unchecked Sendable {
         return result
     }
 
-    private struct CamBarConfig: Codable {
-        var camsnapPath: String?
-        var ffmpegPath: String?
-    }
-
-    private static func configFileURL() -> URL {
-        let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)
-            .first ?? URL(fileURLWithPath: NSTemporaryDirectory())
-        let folder = base.appendingPathComponent("CamBar", isDirectory: true)
-        try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
-        return folder.appendingPathComponent("config.json")
-    }
-
-    private static func loadConfig() -> CamBarConfig {
-        let url = configFileURL()
-        guard let data = try? Data(contentsOf: url) else {
-            return CamBarConfig()
+    private static func userDefaultString(_ key: String) -> String? {
+        guard let value = UserDefaults.standard.string(forKey: key)?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+              !value.isEmpty else {
+            return nil
         }
-        return (try? JSONDecoder().decode(CamBarConfig.self, from: data)) ?? CamBarConfig()
+        return value
+    }
+
+    private static func loadRtspOverride() -> String? {
+        if let env = ProcessInfo.processInfo.environment["CAMBAR_RTSP_URL"],
+           !env.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return env
+        }
+        return userDefaultString("rtspURL")
+    }
+
+    private static func displayName(from rtspURL: String) -> String? {
+        guard let url = URL(string: rtspURL) else { return nil }
+        return url.host
     }
 
     private static func loadCameraName(from url: URL) -> String? {
@@ -474,9 +500,6 @@ final class CameraFrameProvider: ObservableObject, @unchecked Sendable {
     }
 
     private static func buildRtspURL(from camera: CameraConfig) -> String? {
-        if let override = ProcessInfo.processInfo.environment["CAMBAR_RTSP_URL"], !override.isEmpty {
-            return override
-        }
         if let stream = camera.stream, stream.contains("://") {
             return stream
         }
