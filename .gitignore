@@ -1,0 +1,8 @@
+.DS_Store
+.build/
+.swiftpm/
+.devenv/
+.devenv.flake.nix
+.direnv/
+.nix-*
+CamBar.app/
