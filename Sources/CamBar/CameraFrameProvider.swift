@@ -71,8 +71,8 @@ final class CameraFrameProvider: ObservableObject, @unchecked Sendable {
     private func refreshInputs() {
         cameraConfig = Self.loadCameraConfig(from: camsnapConfigURL)
         cameraName = Self.loadCameraName(from: camsnapConfigURL) ?? "hikvision"
-        camsnapPath = Self.resolveExecutablePath("camsnap", overridePath: Self.userDefaultString("camsnapPath"))
-        ffmpegPath = Self.resolveExecutablePath("ffmpeg", overridePath: Self.userDefaultString("ffmpegPath"))
+        camsnapPath = Self.resolveExecutablePath("camsnap", overridePath: nil)
+        ffmpegPath = Self.resolveExecutablePath("ffmpeg", overridePath: nil)
     }
 
     private func start() {
