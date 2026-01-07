@@ -39,9 +39,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 onReload: { [weak frameProvider] in
                     frameProvider?.reload()
                 },
-                onOpenConfig: {
-                    CameraFrameProvider.openConfig()
-                },
                 onOpenCache: {
                     CameraFrameProvider.openCacheFolder()
                 },

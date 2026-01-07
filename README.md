@@ -4,6 +4,8 @@
 >
 > <sub>[skip to agent copypasta](#give-this-to-your-ai-agent)</sub>
 
+![CamBar preview](camera-pixelated2.jpg)
+
 ## The Magic
 
 - **Menubar first.** A lightweight popover for quick checks, plus a full window for full-res viewing.
@@ -12,14 +14,22 @@
 
 ## What it does
 
-CamBar reads your camera config (or an RTSP URL), starts `ffmpeg` to generate HLS segments, then plays them in a menubar popover and a standard window. It keeps playback pinned to the live edge so the feed stays current.
+CamBar reads your RTSP URL (stored inside the app), starts `ffmpeg` to generate HLS segments, then plays them in a menubar popover and a standard window. It keeps playback pinned to the live edge so the feed stays current.
+
+## First run
+
+- Open the menubar popover.
+- Click **Settings** and paste your RTSP URL.
+- Close the sheet; the stream should start within a second or two.
 
 ## Requirements
 
 - macOS 14+
-- `ffmpeg` on PATH (or set in config)
 - A reachable RTSP camera
-- Optional: `camsnap` config for camera discovery
+
+Optional (auto-bundled when packaging if available on PATH):
+- `ffmpeg`
+- `camsnap`
 
 ## Run locally
 
@@ -29,26 +39,36 @@ CamBar reads your camera config (or an RTSP URL), starts `ffmpeg` to generate HL
 
 ## Configuration
 
-CamBar reads `~/.config/camsnap/config.yaml` by default. If you want to bypass camsnap, set:
+CamBar stores settings in the app (UserDefaults). The only required setting is your RTSP URL.
+
+Debug overrides:
 
 ```bash
 export CAMBAR_RTSP_URL="rtsp://user:pass@camera-host:554/Streaming/Channels/101"
 ```
 
-You can also set explicit binary paths in:
+If no RTSP URL is set, CamBar will try to read `~/.config/camsnap/config.yaml` when present.
 
-```
-~/Library/Application Support/CamBar/config.json
-```
+## Packaging
 
-Example:
+`Scripts/package_app.sh` bundles `ffmpeg` and `camsnap` into the app if they are available on PATH at build time. The runtime will prefer bundled binaries, then fall back to PATH.
 
-```json
-{
-  "ffmpegPath": "/opt/homebrew/bin/ffmpeg",
-  "camsnapPath": "/opt/homebrew/bin/camsnap"
-}
-```
+## Zero to MVP (anonymized)
+
+A short, sanitized prompt history from first request to a working menubar app:
+
+1. **Prompt:** “Build a macOS menubar app to show a live RTSP camera.”
+   **Outcome:** SwiftPM app scaffolded with menubar popover + full-size window.
+2. **Prompt:** “Wire it to an RTSP camera using a local toolchain.”
+   **Outcome:** RTSP → ffmpeg → HLS pipeline + local HTTP server.
+3. **Prompt:** “Playback is static / stalls.”
+   **Outcome:** HLS re-encode, live-edge watchdog, and playback restarts.
+4. **Prompt:** “Make it feel like a real app.”
+   **Outcome:** Settings sheet, bundled helpers, and cleaned README.
+
+## Skill used
+
+`https://github.com/Dimillian/Skills/tree/main/macos-spm-app-packaging`
 
 ## Give this to your AI agent
 
@@ -63,14 +83,15 @@ What the app does:
 - Menubar popover with live feed
 - Optional full-size window for full-res viewing
 - Uses ffmpeg to produce HLS locally, then AVPlayer for playback
+- Stores settings inside the app (no external config required)
 
 What I need you to do:
 1) Build and run the app
-2) Wire it to my RTSP camera (use CAMBAR_RTSP_URL or camsnap config)
+2) Open Settings and paste my RTSP URL
 3) Keep playback on the live edge (no drifting/stalls)
 4) Ensure no credentials are committed
 
 Notes:
-- ffmpeg must be on PATH or set in config.json
 - macOS 14+
+- CAMBAR_RTSP_URL can override settings for debugging
 ```

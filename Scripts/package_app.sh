@@ -165,6 +165,18 @@ if [[ -f "$ICON_TARGET" ]]; then
   cp "$ICON_TARGET" "$APP/Contents/Resources/Icon.icns"
 fi
 
+# Bundle helper binaries when available (ffmpeg/camsnap).
+BUNDLE_BIN_DIR="$APP/Contents/Resources/bin"
+mkdir -p "$BUNDLE_BIN_DIR"
+if command -v ffmpeg >/dev/null 2>&1; then
+  cp "$(command -v ffmpeg)" "$BUNDLE_BIN_DIR/ffmpeg"
+  chmod +x "$BUNDLE_BIN_DIR/ffmpeg"
+fi
+if command -v camsnap >/dev/null 2>&1; then
+  cp "$(command -v camsnap)" "$BUNDLE_BIN_DIR/camsnap"
+  chmod +x "$BUNDLE_BIN_DIR/camsnap"
+fi
+
 # Ensure contents are writable before stripping attributes and signing.
 chmod -R u+w "$APP"
 
