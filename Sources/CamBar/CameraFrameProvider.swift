@@ -181,7 +181,7 @@ final class CameraFrameProvider: ObservableObject, @unchecked Sendable {
             "-f", "hls",
             "-hls_time", "1",
             "-hls_list_size", "12",
-            "-hls_flags", "append_list+omit_endlist+independent_segments",
+            "-hls_flags", "delete_segments+omit_endlist+independent_segments",
             "-hls_segment_filename", hlsFolderURL.appendingPathComponent("segment-%03d.ts").path,
             playlistURL.path
         ]
