@@ -336,6 +336,7 @@ final class CameraFrameProvider: ObservableObject, @unchecked Sendable {
                     self.stallTicks += 1
                 } else {
                     self.stallTicks = 0
+                    self.lastUpdated = Date()
                 }
                 self.lastPlaybackSeconds = seconds
                 if self.stallTicks >= 3, let url = self.streamURL {
