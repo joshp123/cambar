@@ -35,6 +35,13 @@ struct ContentView: View {
             HStack {
                 Text("Camera: \(frameProvider.cameraName)")
                 Spacer()
+                if let lag = frameProvider.lagSeconds {
+                    Text("Lag \(lag, specifier: "%.1f")s")
+                        .foregroundColor(.secondary)
+                } else {
+                    Text("Lag --")
+                        .foregroundColor(.secondary)
+                }
                 if let updated = frameProvider.lastUpdated {
                     Text("Updated \(updated.formatted(date: .omitted, time: .standard))")
                         .foregroundColor(.secondary)
