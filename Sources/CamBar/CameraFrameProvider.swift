@@ -8,6 +8,7 @@ final class CameraFrameProvider: ObservableObject, @unchecked Sendable {
     @Published private(set) var player: AVPlayer?
     @Published private(set) var errorMessage: String?
     @Published private(set) var lastUpdated: Date?
+    @Published private(set) var lagSeconds: Double?
     @Published private(set) var cameraName: String
     @Published private(set) var camsnapPath: String?
     @Published private(set) var ffmpegPath: String?
@@ -27,14 +28,16 @@ final class CameraFrameProvider: ObservableObject, @unchecked Sendable {
     private var playbackTimer: DispatchSourceTimer?
     private var lastPlaybackSeconds: Double?
     private var stallTicks = 0
+    private var requestedStop = false
+    private var restartAttempt = 0
 
     init(autoStart: Bool = true) {
         self.camsnapConfigURL = Self.defaultConfigURL()
         self.hlsFolderURL = Self.makeHLSFolderURL()
         self.playlistURL = hlsFolderURL.appendingPathComponent("master.m3u8")
         self.cameraName = Self.loadCameraName(from: camsnapConfigURL) ?? "hikvision"
-        self.camsnapPath = Self.resolveExecutablePath("camsnap", overridePath: Self.userDefaultString("camsnapPath"))
-        self.ffmpegPath = Self.resolveExecutablePath("ffmpeg", overridePath: Self.userDefaultString("ffmpegPath"))
+        self.camsnapPath = Self.resolveExecutablePath("camsnap", overridePath: nil)
+        self.ffmpegPath = Self.resolveExecutablePath("ffmpeg", overridePath: nil)
         self.cameraConfig = Self.loadCameraConfig(from: camsnapConfigURL)
         let serverFile = hlsFolderURL.appendingPathComponent("server.txt")
         self.server = HLSServer(root: hlsFolderURL, onReady: { url in
@@ -120,6 +123,7 @@ final class CameraFrameProvider: ObservableObject, @unchecked Sendable {
     }
 
     private func stopStreamInternal() {
+        requestedStop = true
         readinessTimer?.cancel()
         readinessTimer = nil
         if let process = ffmpegProcess {
@@ -140,7 +144,9 @@ final class CameraFrameProvider: ObservableObject, @unchecked Sendable {
             self.playbackTimer = nil
             self.lastPlaybackSeconds = nil
             self.stallTicks = 0
+            self.lagSeconds = nil
         }
+        requestedStop = false
     }
 
     private func startStream(ffmpegPath: String, rtspURL: String, transport: String?) {
@@ -149,6 +155,7 @@ final class CameraFrameProvider: ObservableObject, @unchecked Sendable {
         defer { isStarting = false }
 
         killLegacyFfmpeg()
+        restartAttempt = 0
 
         let process = Process()
         process.executableURL = URL(fileURLWithPath: ffmpegPath)
@@ -210,8 +217,10 @@ final class CameraFrameProvider: ObservableObject, @unchecked Sendable {
                 try? logHandle.close()
                 self.logHandle = nil
             }
-            if proc.terminationStatus != 0 {
-                self.publishError("ffmpeg exited with code \(proc.terminationStatus).")
+            let code = proc.terminationStatus
+            if code != 0 && code != 15 && !self.requestedStop {
+                self.publishError("ffmpeg exited with code \(code). Retrying…")
+                self.scheduleRestart()
             }
         }
 
@@ -289,6 +298,16 @@ final class CameraFrameProvider: ObservableObject, @unchecked Sendable {
         readinessTimer = timer
     }
 
+    private func scheduleRestart() {
+        restartAttempt += 1
+        let delay = min(pow(2.0, Double(restartAttempt)), 10.0)
+        workerQueue.asyncAfter(deadline: .now() + delay) { [weak self] in
+            guard let self else { return }
+            self.stopStreamInternal()
+            self.start()
+        }
+    }
+
     private func startPlaybackWatchdog() {
         playbackTimer?.cancel()
         let timer = DispatchSource.makeTimerSource(queue: .main)
@@ -303,6 +322,7 @@ final class CameraFrameProvider: ObservableObject, @unchecked Sendable {
                 let current = player.currentTime()
                 if live.isNumeric && current.isNumeric {
                     let lag = CMTimeSubtract(live, current)
+                    self.lagSeconds = max(lag.seconds, 0)
                     if lag.seconds > 1.5 {
                         item.seek(to: live, toleranceBefore: .zero, toleranceAfter: .zero) { _ in
                             player.play()
