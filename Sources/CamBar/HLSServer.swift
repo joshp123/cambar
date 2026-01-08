@@ -96,16 +96,18 @@ final class HLSServer: @unchecked Sendable {
                 return
             }
             let slice = data.subdata(in: start..<(end + 1))
-            let headers = [
-                "HTTP/1.1 206 Partial Content",
-                "Content-Type: \(contentType)",
-                "Content-Length: \(slice.count)",
-                "Accept-Ranges: bytes",
-                "Content-Range: bytes \(start)-\(end)/\(total)",
-                "Cache-Control: no-cache",
-                "Connection: close",
-                "\r\n"
-            ].joined(separator: "\r\n")
+        let headers = [
+            "HTTP/1.1 206 Partial Content",
+            "Content-Type: \(contentType)",
+            "Content-Length: \(slice.count)",
+            "Accept-Ranges: bytes",
+            "Content-Range: bytes \(start)-\(end)/\(total)",
+            "Cache-Control: no-store, no-cache, must-revalidate, max-age=0",
+            "Pragma: no-cache",
+            "Expires: 0",
+            "Connection: close",
+            "\r\n"
+        ].joined(separator: "\r\n")
 
             var payload = Data(headers.utf8)
             if method.uppercased() != "HEAD" {
@@ -128,7 +130,9 @@ final class HLSServer: @unchecked Sendable {
             "HTTP/1.1 \(status)",
             "Content-Type: \(contentType)",
             "Content-Length: \(body.count)",
-            "Cache-Control: no-cache",
+            "Cache-Control: no-store, no-cache, must-revalidate, max-age=0",
+            "Pragma: no-cache",
+            "Expires: 0",
             "Accept-Ranges: bytes",
             "Connection: close",
             "\r\n"

@@ -9,6 +9,7 @@ struct LiveVideoView: NSViewRepresentable {
         let view = AVPlayerView()
         view.controlsStyle = .none
         view.videoGravity = .resizeAspect
+        view.updatesNowPlayingInfoCenter = false
         view.player = player
         return view
     }
