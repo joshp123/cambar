@@ -1,5 +1,7 @@
 # CamBar
 
+[![License: AGPL-3.0](https://img.shields.io/badge/License-AGPL%20v3-blue.svg)](LICENSE)
+
 > A tiny macOS menubar app that shows your RTSP camera live.
 >
 > <sub>[skip to agent copypasta](#give-this-to-your-ai-agent)</sub>
@@ -123,3 +125,7 @@ Notes:
 - macOS 14+
 - CAMBAR_RTSP_URL can override settings for debugging
 ```
+
+## License
+
+AGPL-3.0. See `LICENSE`.
