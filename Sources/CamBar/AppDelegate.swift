@@ -8,9 +8,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let frameProvider = CameraFrameProvider(autoStart: false)
     private let localNetworkPrompter = LocalNetworkPrompter()
     private var windowController: CameraWindowController?
+    private var wakeObserver: NSObjectProtocol?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         localNetworkPrompter.start()
+        wakeObserver = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didWakeNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            self?.frameProvider.reload()
+        }
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
             self?.frameProvider.startStreaming()
         }
@@ -53,6 +61,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        if let wakeObserver {
+            NSWorkspace.shared.notificationCenter.removeObserver(wakeObserver)
+            self.wakeObserver = nil
+        }
         frameProvider.stop()
     }
 

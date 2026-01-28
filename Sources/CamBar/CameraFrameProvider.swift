@@ -28,6 +28,11 @@ final class CameraFrameProvider: ObservableObject, @unchecked Sendable {
     private var playbackTimer: DispatchSourceTimer?
     private var lastPlaybackSeconds: Double?
     private var stallTicks = 0
+    private var lastPlaylistUpdate: Date?
+    private var lastPlaylistModified: Date?
+    private var lastAutoReloadAt: Date?
+    private let staleThresholdSeconds: TimeInterval = 5
+    private let autoReloadCooldownSeconds: TimeInterval = 10
     private var requestedStop = false
     private var restartAttempt = 0
 
@@ -144,6 +149,8 @@ final class CameraFrameProvider: ObservableObject, @unchecked Sendable {
             self.playbackTimer = nil
             self.lastPlaybackSeconds = nil
             self.stallTicks = 0
+            self.lastPlaylistUpdate = nil
+            self.lastPlaylistModified = nil
             self.lagSeconds = nil
         }
         requestedStop = false
@@ -316,6 +323,8 @@ final class CameraFrameProvider: ObservableObject, @unchecked Sendable {
             guard let self,
                   let player = self.player,
                   let item = player.currentItem else { return }
+            let now = Date()
+            self.updatePlaylistActivity(now: now)
             let ranges = item.seekableTimeRanges
             if let range = ranges.last?.timeRangeValue {
                 let live = CMTimeRangeGetEnd(range)
@@ -336,9 +345,12 @@ final class CameraFrameProvider: ObservableObject, @unchecked Sendable {
                     self.stallTicks += 1
                 } else {
                     self.stallTicks = 0
-                    self.lastUpdated = Date()
+                    self.lastUpdated = now
                 }
                 self.lastPlaybackSeconds = seconds
+                if self.maybeAutoReloadIfStale(now: now) {
+                    return
+                }
                 if self.stallTicks >= 3, let url = self.streamURL {
                     self.configure(player: player, url: url)
                     player.playImmediately(atRate: 1.0)
@@ -352,6 +364,37 @@ final class CameraFrameProvider: ObservableObject, @unchecked Sendable {
         }
         timer.resume()
         playbackTimer = timer
+    }
+
+    private func updatePlaylistActivity(now: Date) {
+        guard let attributes = try? FileManager.default.attributesOfItem(atPath: playlistURL.path),
+              let modified = attributes[.modificationDate] as? Date else {
+            return
+        }
+        if let last = lastPlaylistModified, modified <= last {
+            return
+        }
+        lastPlaylistModified = modified
+        lastPlaylistUpdate = now
+    }
+
+    private func maybeAutoReloadIfStale(now: Date) -> Bool {
+        guard streamURL != nil else { return false }
+        if let lastAutoReloadAt,
+           now.timeIntervalSince(lastAutoReloadAt) < autoReloadCooldownSeconds {
+            return false
+        }
+        var stale = false
+        if let lastPlaylistUpdate {
+            stale = now.timeIntervalSince(lastPlaylistUpdate) > staleThresholdSeconds
+        }
+        if let lastUpdated {
+            stale = stale || now.timeIntervalSince(lastUpdated) > staleThresholdSeconds
+        }
+        guard stale else { return false }
+        lastAutoReloadAt = now
+        reload()
+        return true
     }
 
     private func configure(player: AVPlayer, url: URL) {
