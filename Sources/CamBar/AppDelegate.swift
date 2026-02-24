@@ -5,7 +5,8 @@ import SwiftUI
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
     private let popover = NSPopover()
-    private let frameProvider = CameraFrameProvider(autoStart: false)
+    private let previewProvider = CameraFrameProvider(autoStart: false, preferPreviewStream: true, cacheNamespace: "hls-preview")
+    private let mainProvider = CameraFrameProvider(autoStart: false, preferPreviewStream: false, cacheNamespace: "hls-main")
     private let localNetworkPrompter = LocalNetworkPrompter()
     private var windowController: CameraWindowController?
     private var wakeObserver: NSObjectProtocol?
@@ -17,10 +18,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             object: nil,
             queue: .main
         ) { [weak self] _ in
-            self?.frameProvider.reload()
+            self?.previewProvider.reload()
+            self?.mainProvider.reload()
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
-            self?.frameProvider.startStreaming()
+            self?.previewProvider.startStreaming()
+            self?.mainProvider.startStreaming()
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + 6) { [weak self] in
             self?.localNetworkPrompter.stop()
@@ -40,21 +43,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         popover.behavior = .transient
-        popover.contentSize = NSSize(width: 680, height: 440)
+        popover.contentSize = NSSize(width: ContentView.VideoMode.small.popoverSize.width,
+                                     height: ContentView.VideoMode.small.popoverSize.height)
         popover.contentViewController = NSHostingController(
             rootView: ContentView(
-                frameProvider: frameProvider,
-                onReload: { [weak frameProvider] in
-                    frameProvider?.reload()
-                },
-                onOpenCache: {
-                    CameraFrameProvider.openCacheFolder()
-                },
+                previewProvider: previewProvider,
+                mainProvider: mainProvider,
                 onOpenWindow: { [weak self] in
                     self?.openWindow()
                 },
-                onQuit: {
-                    NSApp.terminate(nil)
+                onVideoModeChanged: { [weak self] mode in
+                    self?.setPopoverSize(for: mode)
                 }
             )
         )
@@ -65,7 +64,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             NSWorkspace.shared.notificationCenter.removeObserver(wakeObserver)
             self.wakeObserver = nil
         }
-        frameProvider.stop()
+        previewProvider.stop()
+        mainProvider.stop()
     }
 
     @objc private func togglePopover() {
@@ -79,9 +79,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func openWindow() {
         if windowController == nil {
-            windowController = CameraWindowController(frameProvider: frameProvider)
+            windowController = CameraWindowController(frameProvider: mainProvider)
         }
         windowController?.showWindow(nil)
         NSApp.activate(ignoringOtherApps: true)
+    }
+
+    private func setPopoverSize(for mode: ContentView.VideoMode) {
+        let size = mode.popoverSize
+        popover.contentSize = NSSize(width: size.width, height: size.height)
     }
 }

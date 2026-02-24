@@ -50,7 +50,9 @@ struct CameraWindowView: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity)
 
             HStack {
-                Text("Camera: \(frameProvider.cameraName)")
+                Text("Source: \(frameProvider.sourceURLMasked ?? "—")")
+                    .lineLimit(1)
+                    .truncationMode(.middle)
                 Spacer()
                 if let lag = frameProvider.lagSeconds {
                     Text("Lag \(lag, specifier: "%.1f")s")

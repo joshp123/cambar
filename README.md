@@ -16,7 +16,7 @@
 
 ## What it does
 
-CamBar reads your RTSP URL (stored inside the app), starts `ffmpeg` to generate HLS segments, then plays them in a menubar popover and a standard window. It keeps playback pinned to the live edge so the feed stays current.
+CamBar reads your RTSP URL (from `CAMBAR_RTSP_URL` or camsnap config), starts `ffmpeg` to generate HLS segments, then plays them in a menubar popover and a standard window. In small mode it prefers Hikvision substream (`.../Channels/102`) when derivable, falling back to main stream (`.../Channels/101`) if unavailable. It keeps playback pinned to the live edge so the feed stays current.
 
 ## Why
 
@@ -25,8 +25,8 @@ I wanted to know when the postman is at the door. The vendor app for this camera
 ## First run
 
 - Open the menubar popover.
-- Click **Settings** and paste your RTSP URL.
-- Close the sheet; the stream should start within a second or two.
+- Set `CAMBAR_RTSP_URL` if you want to override camera discovery.
+- The stream should start within a second or two.
 
 ## Requirements
 
@@ -43,15 +43,17 @@ If you build from source, `ffmpeg` (and optionally `camsnap`) will be auto‑bun
 
 ## Configuration
 
-CamBar stores settings in the app (UserDefaults). The only required setting is your RTSP URL.
+CamBar reads RTSP in this order:
+1) `CAMBAR_RTSP_URL`
+2) `~/.config/camsnap/config.yaml`
 
-Debug overrides:
+Debug override:
 
 ```bash
 export CAMBAR_RTSP_URL="rtsp://user:pass@camera-host:554/Streaming/Channels/101"
 ```
 
-If no RTSP URL is set, CamBar will try to read `~/.config/camsnap/config.yaml` when present.
+If neither source is available, startup shows an error with the missing path.
 
 ## Packaging
 
@@ -117,13 +119,13 @@ What the app does:
 
 What I need you to do:
 1) Build and run the app
-2) Open Settings and paste my RTSP URL
+2) Set CAMBAR_RTSP_URL (or verify camsnap config)
 3) Keep playback on the live edge (no drifting/stalls)
 4) Ensure no credentials are committed
 
 Notes:
 - macOS 14+
-- CAMBAR_RTSP_URL can override settings for debugging
+- CAMBAR_RTSP_URL can override discovery for debugging
 ```
 
 ## License

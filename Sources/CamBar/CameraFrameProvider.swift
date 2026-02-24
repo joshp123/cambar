@@ -13,6 +13,7 @@ final class CameraFrameProvider: ObservableObject, @unchecked Sendable {
     @Published private(set) var camsnapPath: String?
     @Published private(set) var ffmpegPath: String?
     @Published private(set) var streamURL: URL?
+    @Published private(set) var sourceURLMasked: String?
 
     private let camsnapConfigURL: URL
     private let hlsFolderURL: URL
@@ -35,15 +36,31 @@ final class CameraFrameProvider: ObservableObject, @unchecked Sendable {
     private let autoReloadCooldownSeconds: TimeInterval = 10
     private var requestedStop = false
     private var restartAttempt = 0
+    private var requestedStreamVariant: StreamVariant = .preview
+    private var activeStreamVariant: StreamVariant = .main
+    private var previewStreamKnownUnavailable = false
+    private var lastPrimaryRTSPURL: String?
 
-    init(autoStart: Bool = true) {
+    private enum StreamVariant {
+        case main
+        case preview
+    }
+
+    init(
+        autoStart: Bool = true,
+        preferPreviewStream: Bool = true,
+        cacheNamespace: String? = nil
+    ) {
         self.camsnapConfigURL = Self.defaultConfigURL()
-        self.hlsFolderURL = Self.makeHLSFolderURL()
+        let resolvedNamespace = cacheNamespace ?? (preferPreviewStream ? "hls-preview" : "hls-main")
+        self.hlsFolderURL = Self.makeHLSFolderURL(namespace: resolvedNamespace)
         self.playlistURL = hlsFolderURL.appendingPathComponent("master.m3u8")
         self.cameraName = Self.loadCameraName(from: camsnapConfigURL) ?? "hikvision"
         self.camsnapPath = Self.resolveExecutablePath("camsnap", overridePath: nil)
         self.ffmpegPath = Self.resolveExecutablePath("ffmpeg", overridePath: nil)
         self.cameraConfig = Self.loadCameraConfig(from: camsnapConfigURL)
+        self.requestedStreamVariant = preferPreviewStream ? .preview : .main
+        self.activeStreamVariant = self.requestedStreamVariant
         let serverFile = hlsFolderURL.appendingPathComponent("server.txt")
         self.server = HLSServer(root: hlsFolderURL, onReady: { url in
             try? Data(url.absoluteString.utf8).write(to: serverFile, options: .atomic)
@@ -65,6 +82,18 @@ final class CameraFrameProvider: ObservableObject, @unchecked Sendable {
         stopStream()
     }
 
+    func setUsePreviewStream(_ usePreview: Bool) {
+        workerQueue.async { [weak self] in
+            guard let self else { return }
+            let next: StreamVariant = usePreview ? .preview : .main
+            guard self.requestedStreamVariant != next else { return }
+            self.requestedStreamVariant = next
+            self.stopStreamInternal()
+            Thread.sleep(forTimeInterval: 0.15)
+            self.start()
+        }
+    }
+
     func startStreaming() {
         workerQueue.async { [weak self] in
             self?.start()
@@ -72,7 +101,7 @@ final class CameraFrameProvider: ObservableObject, @unchecked Sendable {
     }
 
     static func openCacheFolder() {
-        let folder = makeHLSFolderURL()
+        let folder = makeHLSFolderURL(namespace: "hls-main")
         NSWorkspace.shared.open(folder)
     }
 
@@ -88,7 +117,7 @@ final class CameraFrameProvider: ObservableObject, @unchecked Sendable {
         let overrideRTSP = Self.loadRtspOverride()
         if overrideRTSP == nil {
             guard FileManager.default.fileExists(atPath: camsnapConfigURL.path) else {
-                publishError("Missing camsnap config at \(camsnapConfigURL.path). Set RTSP URL in Settings or install camsnap.")
+                publishError("Missing camsnap config at \(camsnapConfigURL.path). Set CAMBAR_RTSP_URL or install camsnap.")
                 return
             }
             guard cameraConfig != nil else {
@@ -100,17 +129,33 @@ final class CameraFrameProvider: ObservableObject, @unchecked Sendable {
             publishError("ffmpeg not found. Use local nix build or set FFMPEG_PATH.")
             return
         }
-        let rtspURL = overrideRTSP ?? cameraConfig.flatMap { Self.buildRtspURL(from: $0) }
-        guard let rtspURL else {
-            publishError("Unable to determine RTSP URL. Set it in Settings or check camsnap config.")
+        let primaryRTSPURL = overrideRTSP ?? cameraConfig.flatMap { Self.buildRtspURL(from: $0) }
+        guard let primaryRTSPURL else {
+            publishError("Unable to determine RTSP URL. Set CAMBAR_RTSP_URL or check camsnap config.")
             return
         }
         if overrideRTSP != nil {
-            cameraName = Self.displayName(from: rtspURL) ?? "custom"
+            cameraName = Self.displayName(from: primaryRTSPURL) ?? "custom"
+        }
+        if lastPrimaryRTSPURL != primaryRTSPURL {
+            previewStreamKnownUnavailable = false
+            lastPrimaryRTSPURL = primaryRTSPURL
+        }
+
+        let streamSelection = Self.selectRTSPURL(
+            primary: primaryRTSPURL,
+            requestedVariant: requestedStreamVariant,
+            previewStreamKnownUnavailable: previewStreamKnownUnavailable
+        )
+        activeStreamVariant = streamSelection.variant
+
+        let maskedSource = Self.maskRtspURL(streamSelection.url)
+        DispatchQueue.main.async {
+            self.sourceURLMasked = maskedSource
         }
         clearHLSFolder()
         server.start()
-        startStream(ffmpegPath: ffmpegPath, rtspURL: rtspURL, transport: cameraConfig?.rtspTransport)
+        startStream(ffmpegPath: ffmpegPath, rtspURL: streamSelection.url, transport: cameraConfig?.rtspTransport)
     }
 
     private func restartStream() {
@@ -144,6 +189,7 @@ final class CameraFrameProvider: ObservableObject, @unchecked Sendable {
         DispatchQueue.main.async {
             self.player = nil
             self.streamURL = nil
+            self.sourceURLMasked = nil
             self.playerItemObservation = nil
             self.playbackTimer?.cancel()
             self.playbackTimer = nil
@@ -282,6 +328,9 @@ final class CameraFrameProvider: ObservableObject, @unchecked Sendable {
             if let data = try? Data(contentsOf: self.playlistURL), !data.isEmpty {
                 self.readinessTimer?.cancel()
                 self.readinessTimer = nil
+                if self.activeStreamVariant == .preview {
+                    self.previewStreamKnownUnavailable = false
+                }
                 let url = baseURL.appendingPathComponent("master.m3u8")
                 DispatchQueue.main.async {
                     let player = self.player ?? AVPlayer()
@@ -298,6 +347,13 @@ final class CameraFrameProvider: ObservableObject, @unchecked Sendable {
             if attempts > 50 {
                 self.readinessTimer?.cancel()
                 self.readinessTimer = nil
+                if self.activeStreamVariant == .preview {
+                    self.previewStreamKnownUnavailable = true
+                    self.publishError("Preview stream unavailable. Falling back to main stream…")
+                    self.stopStreamInternal()
+                    self.start()
+                    return
+                }
                 self.publishError("Stream did not start. Check RTSP credentials or camera reachability.")
             }
         }
@@ -500,6 +556,54 @@ final class CameraFrameProvider: ObservableObject, @unchecked Sendable {
         return url.host
     }
 
+    private static func maskRtspURL(_ raw: String) -> String {
+        guard var components = URLComponents(string: raw) else {
+            return raw
+        }
+        if components.password != nil {
+            components.password = "***"
+        }
+        return components.string ?? raw
+    }
+
+    private static func selectRTSPURL(
+        primary: String,
+        requestedVariant: StreamVariant,
+        previewStreamKnownUnavailable: Bool
+    ) -> (url: String, variant: StreamVariant) {
+        guard requestedVariant == .preview, !previewStreamKnownUnavailable,
+              let preview = derivePreviewRTSPURL(from: primary) else {
+            return (primary, .main)
+        }
+        return (preview, .preview)
+    }
+
+    private static func derivePreviewRTSPURL(from primary: String) -> String? {
+        guard var components = URLComponents(string: primary) else {
+            return nil
+        }
+        let hadLeadingSlash = components.percentEncodedPath.hasPrefix("/")
+        var segments = components.percentEncodedPath
+            .split(separator: "/", omittingEmptySubsequences: true)
+            .map(String.init)
+
+        guard segments.count >= 2 else { return nil }
+        for index in 0..<(segments.count - 1) {
+            let current = segments[index].lowercased()
+            guard current == "channels", segments[index + 1] == "101" else {
+                continue
+            }
+            segments[index + 1] = "102"
+            var updatedPath = segments.joined(separator: "/")
+            if hadLeadingSlash {
+                updatedPath = "/" + updatedPath
+            }
+            components.percentEncodedPath = updatedPath
+            return components.string
+        }
+        return nil
+    }
+
     private static func loadCameraName(from url: URL) -> String? {
         return loadCameraConfig(from: url)?.name
     }
@@ -585,11 +689,11 @@ final class CameraFrameProvider: ObservableObject, @unchecked Sendable {
         return "\(scheme)://\(userInfo)\(host):\(port)\(path)"
     }
 
-    private static func makeHLSFolderURL() -> URL {
+    private static func makeHLSFolderURL(namespace: String) -> URL {
         let caches = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)
             .first ?? URL(fileURLWithPath: NSTemporaryDirectory())
         let folder = caches.appendingPathComponent("CamBar", isDirectory: true)
-            .appendingPathComponent("hls", isDirectory: true)
+            .appendingPathComponent(namespace, isDirectory: true)
         try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
         return folder
     }

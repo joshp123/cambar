@@ -8,6 +8,8 @@ APP_PATH="$PROJECT_ROOT/${APP_NAME}.app"
 
 echo "==> Killing existing ${APP_NAME} instances"
 pkill -x "$APP_NAME" || pkill -f "${APP_NAME}.app" || true
+pkill -f "${APP_NAME}.app/Contents/Resources/bin/ffmpeg" 2>/dev/null || true
+pkill -f "${HOME}/Library/Caches/${APP_NAME}/hls/master.m3u8" 2>/dev/null || true
 sleep 0.5
 
 if [[ ! -d "$APP_PATH" ]]; then
