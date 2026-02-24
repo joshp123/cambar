@@ -11,6 +11,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var windowController: CameraWindowController?
     private var wakeObserver: NSObjectProtocol?
 
+    private var storedVideoMode: ContentView.VideoMode {
+        get {
+            ContentView.VideoMode.fromStoredValue(
+                UserDefaults.standard.string(forKey: ContentView.VideoMode.defaultsKey)
+            )
+        }
+        set {
+            UserDefaults.standard.set(newValue.rawValue, forKey: ContentView.VideoMode.defaultsKey)
+        }
+    }
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         localNetworkPrompter.start()
         wakeObserver = NSWorkspace.shared.notificationCenter.addObserver(
@@ -42,18 +53,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             button.action = #selector(togglePopover)
         }
 
+        let initialVideoMode = storedVideoMode
         popover.behavior = .transient
-        popover.contentSize = NSSize(width: ContentView.VideoMode.small.popoverSize.width,
-                                     height: ContentView.VideoMode.small.popoverSize.height)
+        popover.contentSize = NSSize(
+            width: initialVideoMode.popoverSize.width,
+            height: initialVideoMode.popoverSize.height
+        )
         popover.contentViewController = NSHostingController(
             rootView: ContentView(
                 previewProvider: previewProvider,
                 mainProvider: mainProvider,
+                initialVideoMode: initialVideoMode,
                 onOpenWindow: { [weak self] in
                     self?.openWindow()
                 },
                 onVideoModeChanged: { [weak self] mode in
-                    self?.setPopoverSize(for: mode)
+                    self?.handleVideoModeChange(mode)
                 }
             )
         )
@@ -83,6 +98,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         windowController?.showWindow(nil)
         NSApp.activate(ignoringOtherApps: true)
+    }
+
+    private func handleVideoModeChange(_ mode: ContentView.VideoMode) {
+        storedVideoMode = mode
+        setPopoverSize(for: mode)
     }
 
     private func setPopoverSize(for mode: ContentView.VideoMode) {

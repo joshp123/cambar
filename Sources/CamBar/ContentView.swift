@@ -1,9 +1,18 @@
 import SwiftUI
 
 struct ContentView: View {
-    enum VideoMode: Equatable {
+    enum VideoMode: String, Equatable {
         case small
         case large
+
+        static let defaultsKey = "cambar.videoMode"
+
+        static func fromStoredValue(_ value: String?) -> VideoMode {
+            guard let value, let mode = VideoMode(rawValue: value) else {
+                return .small
+            }
+            return mode
+        }
 
         var videoSize: CGSize {
             switch self {
@@ -43,7 +52,21 @@ struct ContentView: View {
     let onOpenWindow: () -> Void
     let onVideoModeChanged: (VideoMode) -> Void
 
-    @State private var videoMode: VideoMode = .small
+    @State private var videoMode: VideoMode
+
+    init(
+        previewProvider: CameraFrameProvider,
+        mainProvider: CameraFrameProvider,
+        initialVideoMode: VideoMode = .small,
+        onOpenWindow: @escaping () -> Void,
+        onVideoModeChanged: @escaping (VideoMode) -> Void
+    ) {
+        self.previewProvider = previewProvider
+        self.mainProvider = mainProvider
+        self.onOpenWindow = onOpenWindow
+        self.onVideoModeChanged = onVideoModeChanged
+        _videoMode = State(initialValue: initialVideoMode)
+    }
 
     private var activeProvider: CameraFrameProvider {
         videoMode == .small ? previewProvider : mainProvider
