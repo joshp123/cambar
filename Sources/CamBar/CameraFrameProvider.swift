@@ -18,7 +18,7 @@ final class CameraFrameProvider: ObservableObject, @unchecked Sendable {
     private let camsnapConfigURL: URL
     private let hlsFolderURL: URL
     private let playlistURL: URL
-    private var cameraConfig: CameraConfig?
+    private var cameraConfig: StreamSourceResolver.CameraConfig?
     private let workerQueue = DispatchQueue(label: "CamBar.stream.worker")
     private var ffmpegProcess: Process?
     private var logHandle: FileHandle?
@@ -36,29 +36,24 @@ final class CameraFrameProvider: ObservableObject, @unchecked Sendable {
     private let autoReloadCooldownSeconds: TimeInterval = 10
     private var requestedStop = false
     private var restartAttempt = 0
-    private var requestedStreamVariant: StreamVariant = .preview
-    private var activeStreamVariant: StreamVariant = .main
+    private var requestedStreamVariant: StreamSourceResolver.StreamVariant = .preview
+    private var activeStreamVariant: StreamSourceResolver.StreamVariant = .main
     private var previewStreamKnownUnavailable = false
     private var lastPrimaryRTSPURL: String?
-
-    private enum StreamVariant {
-        case main
-        case preview
-    }
 
     init(
         autoStart: Bool = true,
         preferPreviewStream: Bool = true,
         cacheNamespace: String? = nil
     ) {
-        self.camsnapConfigURL = Self.defaultConfigURL()
+        self.camsnapConfigURL = StreamSourceResolver.defaultConfigURL()
         let resolvedNamespace = cacheNamespace ?? (preferPreviewStream ? "hls-preview" : "hls-main")
-        self.hlsFolderURL = Self.makeHLSFolderURL(namespace: resolvedNamespace)
+        self.hlsFolderURL = StreamSourceResolver.makeHLSFolderURL(namespace: resolvedNamespace)
         self.playlistURL = hlsFolderURL.appendingPathComponent("master.m3u8")
-        self.cameraName = Self.loadCameraName(from: camsnapConfigURL) ?? "hikvision"
-        self.camsnapPath = Self.resolveExecutablePath("camsnap", overridePath: nil)
-        self.ffmpegPath = Self.resolveExecutablePath("ffmpeg", overridePath: nil)
-        self.cameraConfig = Self.loadCameraConfig(from: camsnapConfigURL)
+        self.cameraName = StreamSourceResolver.loadCameraName(from: camsnapConfigURL) ?? "hikvision"
+        self.camsnapPath = StreamSourceResolver.resolveExecutablePath("camsnap", overridePath: nil)
+        self.ffmpegPath = StreamSourceResolver.resolveExecutablePath("ffmpeg", overridePath: nil)
+        self.cameraConfig = StreamSourceResolver.loadCameraConfig(from: camsnapConfigURL)
         self.requestedStreamVariant = preferPreviewStream ? .preview : .main
         self.activeStreamVariant = self.requestedStreamVariant
         let serverFile = hlsFolderURL.appendingPathComponent("server.txt")
@@ -85,7 +80,7 @@ final class CameraFrameProvider: ObservableObject, @unchecked Sendable {
     func setUsePreviewStream(_ usePreview: Bool) {
         workerQueue.async { [weak self] in
             guard let self else { return }
-            let next: StreamVariant = usePreview ? .preview : .main
+            let next: StreamSourceResolver.StreamVariant = usePreview ? .preview : .main
             guard self.requestedStreamVariant != next else { return }
             self.requestedStreamVariant = next
             self.stopStreamInternal()
@@ -101,20 +96,20 @@ final class CameraFrameProvider: ObservableObject, @unchecked Sendable {
     }
 
     static func openCacheFolder() {
-        let folder = makeHLSFolderURL(namespace: "hls-main")
+        let folder = StreamSourceResolver.makeHLSFolderURL(namespace: "hls-main")
         NSWorkspace.shared.open(folder)
     }
 
     private func refreshInputs() {
-        cameraConfig = Self.loadCameraConfig(from: camsnapConfigURL)
-        cameraName = Self.loadCameraName(from: camsnapConfigURL) ?? "hikvision"
-        camsnapPath = Self.resolveExecutablePath("camsnap", overridePath: nil)
-        ffmpegPath = Self.resolveExecutablePath("ffmpeg", overridePath: nil)
+        cameraConfig = StreamSourceResolver.loadCameraConfig(from: camsnapConfigURL)
+        cameraName = StreamSourceResolver.loadCameraName(from: camsnapConfigURL) ?? "hikvision"
+        camsnapPath = StreamSourceResolver.resolveExecutablePath("camsnap", overridePath: nil)
+        ffmpegPath = StreamSourceResolver.resolveExecutablePath("ffmpeg", overridePath: nil)
     }
 
     private func start() {
         refreshInputs()
-        let overrideRTSP = Self.loadRtspOverride()
+        let overrideRTSP = StreamSourceResolver.loadRtspOverride()
         if overrideRTSP == nil {
             guard FileManager.default.fileExists(atPath: camsnapConfigURL.path) else {
                 publishError("Missing camsnap config at \(camsnapConfigURL.path). Set CAMBAR_RTSP_URL or install camsnap.")
@@ -129,27 +124,27 @@ final class CameraFrameProvider: ObservableObject, @unchecked Sendable {
             publishError("ffmpeg not found. Use local nix build or set FFMPEG_PATH.")
             return
         }
-        let primaryRTSPURL = overrideRTSP ?? cameraConfig.flatMap { Self.buildRtspURL(from: $0) }
+        let primaryRTSPURL = overrideRTSP ?? cameraConfig.flatMap { StreamSourceResolver.buildRtspURL(from: $0) }
         guard let primaryRTSPURL else {
             publishError("Unable to determine RTSP URL. Set CAMBAR_RTSP_URL or check camsnap config.")
             return
         }
         if overrideRTSP != nil {
-            cameraName = Self.displayName(from: primaryRTSPURL) ?? "custom"
+            cameraName = StreamSourceResolver.displayName(from: primaryRTSPURL) ?? "custom"
         }
         if lastPrimaryRTSPURL != primaryRTSPURL {
             previewStreamKnownUnavailable = false
             lastPrimaryRTSPURL = primaryRTSPURL
         }
 
-        let streamSelection = Self.selectRTSPURL(
+        let streamSelection = StreamSourceResolver.selectRTSPURL(
             primary: primaryRTSPURL,
             requestedVariant: requestedStreamVariant,
             previewStreamKnownUnavailable: previewStreamKnownUnavailable
         )
         activeStreamVariant = streamSelection.variant
 
-        let maskedSource = Self.maskRtspURL(streamSelection.url)
+        let maskedSource = StreamSourceResolver.maskRtspURL(streamSelection.url)
         DispatchQueue.main.async {
             self.sourceURLMasked = maskedSource
         }
@@ -477,224 +472,7 @@ final class CameraFrameProvider: ObservableObject, @unchecked Sendable {
 
     private func buildEnvironment() -> [String: String] {
         var env = ProcessInfo.processInfo.environment
-        env["PATH"] = Self.searchPaths().joined(separator: ":")
+        env["PATH"] = StreamSourceResolver.searchPaths().joined(separator: ":")
         return env
-    }
-
-    private static func resolveExecutablePath(_ name: String, overridePath: String?) -> String? {
-        if let overridePath {
-            let expanded = (overridePath as NSString).expandingTildeInPath
-            if FileManager.default.isExecutableFile(atPath: expanded) {
-                return expanded
-            }
-        }
-        let envVar = name.uppercased() + "_PATH"
-        if let envPath = ProcessInfo.processInfo.environment[envVar],
-           FileManager.default.isExecutableFile(atPath: envPath) {
-            return envPath
-        }
-        for dir in searchPaths() {
-            let path = (dir as NSString).appendingPathComponent(name)
-            if FileManager.default.isExecutableFile(atPath: path) {
-                return path
-            }
-        }
-        return nil
-    }
-
-    private static func defaultConfigURL() -> URL {
-        URL(fileURLWithPath: (NSHomeDirectory() as NSString).appendingPathComponent(".config/camsnap/config.yaml"))
-    }
-
-    private static func searchPaths() -> [String] {
-        var extraPaths = [
-            "/opt/homebrew/bin",
-            "/usr/local/bin",
-            "/run/current-system/sw/bin",
-            "/nix/var/nix/profiles/default/bin",
-            (NSHomeDirectory() as NSString).appendingPathComponent(".nix-profile/bin"),
-            (NSHomeDirectory() as NSString).appendingPathComponent(".local/bin"),
-            "/usr/bin",
-            "/bin"
-        ]
-        if let resourceURL = Bundle.main.resourceURL {
-            let bundled = resourceURL.appendingPathComponent("bin").path
-            extraPaths.insert(bundled, at: 0)
-        }
-        let inherited = (ProcessInfo.processInfo.environment["PATH"] ?? "")
-            .split(separator: ":", omittingEmptySubsequences: true)
-            .map(String.init)
-        var seen = Set<String>()
-        var result: [String] = []
-        for path in extraPaths + inherited {
-            guard !seen.contains(path) else { continue }
-            seen.insert(path)
-            result.append(path)
-        }
-        return result
-    }
-
-    private static func userDefaultString(_ key: String) -> String? {
-        guard let value = UserDefaults.standard.string(forKey: key)?
-            .trimmingCharacters(in: .whitespacesAndNewlines),
-              !value.isEmpty else {
-            return nil
-        }
-        return value
-    }
-
-    private static func loadRtspOverride() -> String? {
-        if let env = ProcessInfo.processInfo.environment["CAMBAR_RTSP_URL"],
-           !env.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            return env
-        }
-        return userDefaultString("rtspURL")
-    }
-
-    private static func displayName(from rtspURL: String) -> String? {
-        guard let url = URL(string: rtspURL) else { return nil }
-        return url.host
-    }
-
-    private static func maskRtspURL(_ raw: String) -> String {
-        guard var components = URLComponents(string: raw) else {
-            return raw
-        }
-        if components.password != nil {
-            components.password = "***"
-        }
-        return components.string ?? raw
-    }
-
-    private static func selectRTSPURL(
-        primary: String,
-        requestedVariant: StreamVariant,
-        previewStreamKnownUnavailable: Bool
-    ) -> (url: String, variant: StreamVariant) {
-        guard requestedVariant == .preview, !previewStreamKnownUnavailable,
-              let preview = derivePreviewRTSPURL(from: primary) else {
-            return (primary, .main)
-        }
-        return (preview, .preview)
-    }
-
-    private static func derivePreviewRTSPURL(from primary: String) -> String? {
-        guard var components = URLComponents(string: primary) else {
-            return nil
-        }
-        let hadLeadingSlash = components.percentEncodedPath.hasPrefix("/")
-        var segments = components.percentEncodedPath
-            .split(separator: "/", omittingEmptySubsequences: true)
-            .map(String.init)
-
-        guard segments.count >= 2 else { return nil }
-        for index in 0..<(segments.count - 1) {
-            let current = segments[index].lowercased()
-            guard current == "channels", segments[index + 1] == "101" else {
-                continue
-            }
-            segments[index + 1] = "102"
-            var updatedPath = segments.joined(separator: "/")
-            if hadLeadingSlash {
-                updatedPath = "/" + updatedPath
-            }
-            components.percentEncodedPath = updatedPath
-            return components.string
-        }
-        return nil
-    }
-
-    private static func loadCameraName(from url: URL) -> String? {
-        return loadCameraConfig(from: url)?.name
-    }
-
-    private struct CameraConfig {
-        var name: String?
-        var host: String?
-        var port: Int?
-        var protocolName: String?
-        var username: String?
-        var password: String?
-        var rtspTransport: String?
-        var stream: String?
-    }
-
-    private static func loadCameraConfig(from url: URL) -> CameraConfig? {
-        guard let data = try? Data(contentsOf: url),
-              let text = String(data: data, encoding: .utf8) else {
-            return nil
-        }
-        var current = CameraConfig()
-        var hasCamera = false
-        for rawLine in text.split(whereSeparator: \.isNewline) {
-            let line = rawLine.trimmingCharacters(in: .whitespaces)
-            if line.isEmpty || line.hasPrefix("#") { continue }
-            if line.hasPrefix("- name:") {
-                if hasCamera {
-                    break
-                }
-                hasCamera = true
-                current.name = line.replacingOccurrences(of: "- name:", with: "")
-                    .trimmingCharacters(in: .whitespaces)
-                continue
-            }
-            let parts = line.split(separator: ":", maxSplits: 1, omittingEmptySubsequences: false)
-            guard parts.count == 2 else { continue }
-            let key = parts[0].trimmingCharacters(in: .whitespaces)
-            let rawValue = parts[1].trimmingCharacters(in: .whitespaces)
-            let value = stripQuotes(rawValue)
-            switch key {
-            case "host": current.host = value
-            case "port": current.port = Int(value)
-            case "protocol": current.protocolName = value
-            case "username": current.username = value
-            case "password": current.password = value
-            case "rtsp_transport": current.rtspTransport = value
-            case "stream": current.stream = value
-            default: break
-            }
-        }
-        return hasCamera ? current : nil
-    }
-
-    private static func stripQuotes(_ value: String) -> String {
-        guard value.count >= 2 else { return value }
-        let first = value.first
-        let last = value.last
-        if (first == "\"" && last == "\"") || (first == "'" && last == "'") {
-            return String(value.dropFirst().dropLast())
-        }
-        return value
-    }
-
-    private static func buildRtspURL(from camera: CameraConfig) -> String? {
-        if let stream = camera.stream, stream.contains("://") {
-            return stream
-        }
-        guard let host = camera.host else { return nil }
-        let scheme = camera.protocolName ?? "rtsp"
-        let port = camera.port ?? 554
-        var userInfo = ""
-        if let username = camera.username {
-            let user = username.addingPercentEncoding(withAllowedCharacters: .urlUserAllowed) ?? username
-            if let password = camera.password {
-                let pass = password.addingPercentEncoding(withAllowedCharacters: .urlPasswordAllowed) ?? password
-                userInfo = "\(user):\(pass)@"
-            } else {
-                userInfo = "\(user)@"
-            }
-        }
-        let streamPath = camera.stream ?? "Streaming/Channels/101"
-        let path = streamPath.hasPrefix("/") ? streamPath : "/\(streamPath)"
-        return "\(scheme)://\(userInfo)\(host):\(port)\(path)"
-    }
-
-    private static func makeHLSFolderURL(namespace: String) -> URL {
-        let caches = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)
-            .first ?? URL(fileURLWithPath: NSTemporaryDirectory())
-        let folder = caches.appendingPathComponent("CamBar", isDirectory: true)
-            .appendingPathComponent(namespace, isDirectory: true)
-        try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
-        return folder
     }
 }
