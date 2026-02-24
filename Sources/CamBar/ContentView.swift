@@ -73,21 +73,11 @@ struct ContentView: View {
             .background(Color.black.opacity(0.9))
             .cornerRadius(8)
 
-            HStack(spacing: 10) {
-                Text("Source: \(activeProvider.sourceURLMasked ?? "—")")
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-                Spacer()
-                if let lag = activeProvider.lagSeconds {
-                    Text("Lag \(lag, specifier: "%.1f")s")
-                        .foregroundColor(.secondary)
-                }
-                if let updated = activeProvider.lastUpdated {
-                    Text("Updated \(updated.formatted(date: .omitted, time: .standard))")
-                        .foregroundColor(.secondary)
-                }
-            }
-            .font(.caption)
+            StreamStatusView(
+                sourceURLMasked: activeProvider.sourceURLMasked,
+                lagSeconds: activeProvider.lagSeconds,
+                lastUpdated: activeProvider.lastUpdated
+            )
 
             HStack {
                 Button(videoMode.toggleTitle) {

@@ -1,6 +1,5 @@
 import AVFoundation
-import AVKit
-import AppKit
+import CamBarCore
 import Foundation
 
 // GCD serializes streaming work; UI updates are dispatched onto the main queue.
@@ -9,11 +8,10 @@ final class CameraFrameProvider: ObservableObject, @unchecked Sendable {
     @Published private(set) var errorMessage: String?
     @Published private(set) var lastUpdated: Date?
     @Published private(set) var lagSeconds: Double?
-    @Published private(set) var cameraName: String
-    @Published private(set) var camsnapPath: String?
-    @Published private(set) var ffmpegPath: String?
-    @Published private(set) var streamURL: URL?
     @Published private(set) var sourceURLMasked: String?
+
+    private var cameraName: String
+    private var streamURL: URL?
 
     private let camsnapConfigURL: URL
     private let hlsFolderURL: URL
@@ -51,8 +49,6 @@ final class CameraFrameProvider: ObservableObject, @unchecked Sendable {
         self.hlsFolderURL = StreamSourceResolver.makeHLSFolderURL(namespace: resolvedNamespace)
         self.playlistURL = hlsFolderURL.appendingPathComponent("master.m3u8")
         self.cameraName = StreamSourceResolver.loadCameraName(from: camsnapConfigURL) ?? "hikvision"
-        self.camsnapPath = StreamSourceResolver.resolveExecutablePath("camsnap", overridePath: nil)
-        self.ffmpegPath = StreamSourceResolver.resolveExecutablePath("ffmpeg", overridePath: nil)
         self.cameraConfig = StreamSourceResolver.loadCameraConfig(from: camsnapConfigURL)
         self.requestedStreamVariant = preferPreviewStream ? .preview : .main
         self.activeStreamVariant = self.requestedStreamVariant
@@ -95,16 +91,9 @@ final class CameraFrameProvider: ObservableObject, @unchecked Sendable {
         }
     }
 
-    static func openCacheFolder() {
-        let folder = StreamSourceResolver.makeHLSFolderURL(namespace: "hls-main")
-        NSWorkspace.shared.open(folder)
-    }
-
     private func refreshInputs() {
         cameraConfig = StreamSourceResolver.loadCameraConfig(from: camsnapConfigURL)
         cameraName = StreamSourceResolver.loadCameraName(from: camsnapConfigURL) ?? "hikvision"
-        camsnapPath = StreamSourceResolver.resolveExecutablePath("camsnap", overridePath: nil)
-        ffmpegPath = StreamSourceResolver.resolveExecutablePath("ffmpeg", overridePath: nil)
     }
 
     private func start() {
@@ -120,7 +109,7 @@ final class CameraFrameProvider: ObservableObject, @unchecked Sendable {
                 return
             }
         }
-        guard let ffmpegPath else {
+        guard let ffmpegPath = StreamSourceResolver.resolveExecutablePath("ffmpeg", overridePath: nil) else {
             publishError("ffmpeg not found. Use local nix build or set FFMPEG_PATH.")
             return
         }

@@ -49,27 +49,12 @@ struct CameraWindowView: View {
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
 
-            HStack {
-                Text("Source: \(frameProvider.sourceURLMasked ?? "—")")
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-                Spacer()
-                if let lag = frameProvider.lagSeconds {
-                    Text("Lag \(lag, specifier: "%.1f")s")
-                        .foregroundColor(.secondary)
-                } else {
-                    Text("Lag --")
-                        .foregroundColor(.secondary)
-                }
-                if let updated = frameProvider.lastUpdated {
-                    Text("Updated \(updated.formatted(date: .omitted, time: .standard))")
-                        .foregroundColor(.secondary)
-                } else {
-                    Text("No stream yet")
-                        .foregroundColor(.secondary)
-                }
-            }
-            .font(.caption)
+            StreamStatusView(
+                sourceURLMasked: frameProvider.sourceURLMasked,
+                lagSeconds: frameProvider.lagSeconds,
+                lastUpdated: frameProvider.lastUpdated,
+                showPlaceholders: true
+            )
             .padding(8)
         }
     }

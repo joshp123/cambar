@@ -1,23 +1,43 @@
 import Foundation
 
-enum StreamSourceResolver {
-    enum StreamVariant {
+public enum StreamSourceResolver {
+    public enum StreamVariant: Equatable {
         case main
         case preview
     }
 
-    struct CameraConfig {
-        var name: String?
-        var host: String?
-        var port: Int?
-        var protocolName: String?
-        var username: String?
-        var password: String?
-        var rtspTransport: String?
-        var stream: String?
+    public struct CameraConfig {
+        public var name: String?
+        public var host: String?
+        public var port: Int?
+        public var protocolName: String?
+        public var username: String?
+        public var password: String?
+        public var rtspTransport: String?
+        public var stream: String?
+
+        public init(
+            name: String? = nil,
+            host: String? = nil,
+            port: Int? = nil,
+            protocolName: String? = nil,
+            username: String? = nil,
+            password: String? = nil,
+            rtspTransport: String? = nil,
+            stream: String? = nil
+        ) {
+            self.name = name
+            self.host = host
+            self.port = port
+            self.protocolName = protocolName
+            self.username = username
+            self.password = password
+            self.rtspTransport = rtspTransport
+            self.stream = stream
+        }
     }
 
-    static func resolveExecutablePath(_ name: String, overridePath: String?) -> String? {
+    public static func resolveExecutablePath(_ name: String, overridePath: String?) -> String? {
         if let overridePath {
             let expanded = (overridePath as NSString).expandingTildeInPath
             if FileManager.default.isExecutableFile(atPath: expanded) {
@@ -38,11 +58,11 @@ enum StreamSourceResolver {
         return nil
     }
 
-    static func defaultConfigURL() -> URL {
+    public static func defaultConfigURL() -> URL {
         URL(fileURLWithPath: (NSHomeDirectory() as NSString).appendingPathComponent(".config/camsnap/config.yaml"))
     }
 
-    static func searchPaths() -> [String] {
+    public static func searchPaths() -> [String] {
         var extraPaths = [
             "/opt/homebrew/bin",
             "/usr/local/bin",
@@ -70,7 +90,7 @@ enum StreamSourceResolver {
         return result
     }
 
-    static func loadRtspOverride() -> String? {
+    public static func loadRtspOverride() -> String? {
         if let env = ProcessInfo.processInfo.environment["CAMBAR_RTSP_URL"],
            !env.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             return env
@@ -78,12 +98,12 @@ enum StreamSourceResolver {
         return userDefaultString("rtspURL")
     }
 
-    static func displayName(from rtspURL: String) -> String? {
+    public static func displayName(from rtspURL: String) -> String? {
         guard let url = URL(string: rtspURL) else { return nil }
         return url.host
     }
 
-    static func maskRtspURL(_ raw: String) -> String {
+    public static func maskRtspURL(_ raw: String) -> String {
         guard var components = URLComponents(string: raw) else {
             return raw
         }
@@ -93,7 +113,7 @@ enum StreamSourceResolver {
         return components.string ?? raw
     }
 
-    static func selectRTSPURL(
+    public static func selectRTSPURL(
         primary: String,
         requestedVariant: StreamVariant,
         previewStreamKnownUnavailable: Bool
@@ -106,7 +126,7 @@ enum StreamSourceResolver {
         return (preview, .preview)
     }
 
-    static func derivePreviewRTSPURL(from primary: String) -> String? {
+    public static func derivePreviewRTSPURL(from primary: String) -> String? {
         guard var components = URLComponents(string: primary) else {
             return nil
         }
@@ -132,11 +152,11 @@ enum StreamSourceResolver {
         return nil
     }
 
-    static func loadCameraName(from url: URL) -> String? {
+    public static func loadCameraName(from url: URL) -> String? {
         loadCameraConfig(from: url)?.name
     }
 
-    static func loadCameraConfig(from url: URL) -> CameraConfig? {
+    public static func loadCameraConfig(from url: URL) -> CameraConfig? {
         guard let data = try? Data(contentsOf: url),
               let text = String(data: data, encoding: .utf8) else {
             return nil
@@ -174,7 +194,7 @@ enum StreamSourceResolver {
         return hasCamera ? current : nil
     }
 
-    static func buildRtspURL(from camera: CameraConfig) -> String? {
+    public static func buildRtspURL(from camera: CameraConfig) -> String? {
         if let stream = camera.stream, stream.contains("://") {
             return stream
         }
@@ -196,7 +216,7 @@ enum StreamSourceResolver {
         return "\(scheme)://\(userInfo)\(host):\(port)\(path)"
     }
 
-    static func makeHLSFolderURL(namespace: String) -> URL {
+    public static func makeHLSFolderURL(namespace: String) -> URL {
         let caches = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)
             .first ?? URL(fileURLWithPath: NSTemporaryDirectory())
         let folder = caches.appendingPathComponent("CamBar", isDirectory: true)

@@ -8,11 +8,17 @@ final class HLSServer: @unchecked Sendable {
     private(set) var baseURL: URL?
     private let onReady: ((URL) -> Void)?
     private let logURL: URL
+    private let requestLoggingEnabled: Bool
 
-    init(root: URL, onReady: ((URL) -> Void)? = nil) {
+    init(
+        root: URL,
+        onReady: ((URL) -> Void)? = nil,
+        requestLoggingEnabled: Bool = ProcessInfo.processInfo.environment["CAMBAR_DEBUG_HTTP"] == "1"
+    ) {
         self.root = root
         self.onReady = onReady
         self.logURL = root.appendingPathComponent("requests.log")
+        self.requestLoggingEnabled = requestLoggingEnabled
     }
 
     func start() {
@@ -96,18 +102,18 @@ final class HLSServer: @unchecked Sendable {
                 return
             }
             let slice = data.subdata(in: start..<(end + 1))
-        let headers = [
-            "HTTP/1.1 206 Partial Content",
-            "Content-Type: \(contentType)",
-            "Content-Length: \(slice.count)",
-            "Accept-Ranges: bytes",
-            "Content-Range: bytes \(start)-\(end)/\(total)",
-            "Cache-Control: no-store, no-cache, must-revalidate, max-age=0",
-            "Pragma: no-cache",
-            "Expires: 0",
-            "Connection: close",
-            "\r\n"
-        ].joined(separator: "\r\n")
+            let headers = [
+                "HTTP/1.1 206 Partial Content",
+                "Content-Type: \(contentType)",
+                "Content-Length: \(slice.count)",
+                "Accept-Ranges: bytes",
+                "Content-Range: bytes \(start)-\(end)/\(total)",
+                "Cache-Control: no-store, no-cache, must-revalidate, max-age=0",
+                "Pragma: no-cache",
+                "Expires: 0",
+                "Connection: close",
+                "\r\n"
+            ].joined(separator: "\r\n")
 
             var payload = Data(headers.utf8)
             if method.uppercased() != "HEAD" {
@@ -179,6 +185,7 @@ final class HLSServer: @unchecked Sendable {
     }
 
     private func logRequest(method: String, path: String, range: ByteRange?) {
+        guard requestLoggingEnabled else { return }
         let rangeText: String
         if let range {
             if let end = range.end {

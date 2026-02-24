@@ -7,11 +7,19 @@ let package = Package(
         .macOS(.v14),
     ],
     targets: [
+        .target(
+            name: "CamBarCore",
+            path: "Sources/CamBarCore"
+        ),
         .executableTarget(
             name: "CamBar",
-            path: "Sources/CamBar"),
+            dependencies: ["CamBarCore"],
+            path: "Sources/CamBar"
+        ),
         .testTarget(
             name: "CamBarTests",
-            path: "Tests/CamBarTests")
+            dependencies: ["CamBarCore"],
+            path: "Tests/CamBarTests"
+        )
     ]
 )

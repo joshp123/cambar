@@ -47,10 +47,11 @@ CamBar reads RTSP in this order:
 1) `CAMBAR_RTSP_URL`
 2) `~/.config/camsnap/config.yaml`
 
-Debug override:
+Debug overrides:
 
 ```bash
 export CAMBAR_RTSP_URL="rtsp://user:pass@camera-host:554/Streaming/Channels/101"
+export CAMBAR_DEBUG_HTTP=1  # enables HLS request logging to requests.log
 ```
 
 If neither source is available, startup shows an error with the missing path.
