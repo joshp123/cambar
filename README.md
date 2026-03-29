@@ -16,7 +16,7 @@
 
 ## What it does
 
-CamBar reads your RTSP URL (from `CAMBAR_RTSP_URL` or camsnap config), starts `ffmpeg` to generate HLS segments, then plays them in a menubar popover and a standard window. In small mode it prefers Hikvision substream (`.../Channels/102`) when derivable, falling back to main stream (`.../Channels/101`) if unavailable. It keeps playback pinned to the live edge so the feed stays current.
+CamBar reads your RTSP URL (from `CAMBAR_RTSP_URL` or camsnap config), starts `ffmpeg` to generate HLS segments, then plays them in a menubar popover and a standard window. In small mode it prefers Hikvision substream (`.../Channels/102`) when derivable, falling back to main stream (`.../Channels/101`) if unavailable. It keeps the preview stream warm, starts the full-res stream only when the UI needs it, and stays pinned to the live edge so the feed stays current.
 
 ## Why
 
@@ -52,6 +52,7 @@ Debug overrides:
 ```bash
 export CAMBAR_RTSP_URL="rtsp://user:pass@camera-host:554/Streaming/Channels/101"
 export CAMBAR_DEBUG_HTTP=1  # enables HLS request logging to requests.log
+export CAMBAR_KEEP_MAIN_STREAM_WARM=1  # keeps the main stream hot for instant large/open, with background CPU cost
 ```
 
 If neither source is available, startup shows an error with the missing path.

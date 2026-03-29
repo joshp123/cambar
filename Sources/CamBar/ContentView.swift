@@ -1,3 +1,4 @@
+import AVFoundation
 import SwiftUI
 
 struct ContentView: View {
@@ -72,10 +73,27 @@ struct ContentView: View {
         videoMode == .small ? previewProvider : mainProvider
     }
 
+    private var displayedProvider: CameraFrameProvider {
+        if videoMode == .large, mainProvider.player == nil, previewProvider.player != nil {
+            return previewProvider
+        }
+        return activeProvider
+    }
+
+    private var loadingLargeStreamMessage: String? {
+        guard videoMode == .large, mainProvider.player == nil, previewProvider.player != nil else {
+            return nil
+        }
+        if mainProvider.errorMessage != nil {
+            return "Main stream unavailable. Showing preview."
+        }
+        return "Loading full resolution..."
+    }
+
     var body: some View {
         VStack(spacing: 10) {
             ZStack {
-                if let player = activeProvider.player {
+                if let player = displayedProvider.player {
                     LiveVideoView(player: player)
                 } else if let error = activeProvider.errorMessage {
                     VStack(spacing: 6) {
@@ -91,15 +109,26 @@ struct ContentView: View {
                     Text("Waiting for stream…")
                         .foregroundColor(.white)
                 }
+
+                if let loadingLargeStreamMessage {
+                    Text(loadingLargeStreamMessage)
+                        .font(.caption.weight(.semibold))
+                        .foregroundColor(.white)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 6)
+                        .background(.black.opacity(0.65), in: Capsule())
+                        .padding(16)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
+                }
             }
             .frame(width: videoMode.videoSize.width, height: videoMode.videoSize.height)
             .background(Color.black.opacity(0.9))
             .cornerRadius(8)
 
             StreamStatusView(
-                sourceURLMasked: activeProvider.sourceURLMasked,
-                lagSeconds: activeProvider.lagSeconds,
-                lastUpdated: activeProvider.lastUpdated
+                sourceURLMasked: displayedProvider.sourceURLMasked,
+                lagSeconds: displayedProvider.lagSeconds,
+                lastUpdated: displayedProvider.lastUpdated
             )
 
             HStack {

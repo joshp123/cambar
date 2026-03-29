@@ -97,6 +97,7 @@ final class CameraFrameProvider: ObservableObject, @unchecked Sendable {
     }
 
     private func start() {
+        guard ffmpegProcess == nil else { return }
         refreshInputs()
         let overrideRTSP = StreamSourceResolver.loadRtspOverride()
         if overrideRTSP == nil {
@@ -208,13 +209,11 @@ final class CameraFrameProvider: ObservableObject, @unchecked Sendable {
             "-flags", "low_delay",
             "-i", rtspURL,
             "-an",
-            "-c:v", "libx264",
-            "-preset", "veryfast",
-            "-tune", "zerolatency",
+            "-c:v", "h264_videotoolbox",
+            "-realtime", "1",
             "-pix_fmt", "yuv420p",
             "-g", "25",
-            "-keyint_min", "25",
-            "-sc_threshold", "0",
+            "-bf", "0",
             "-f", "hls",
             "-hls_time", "1",
             "-hls_list_size", "12",
