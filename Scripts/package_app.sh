@@ -66,10 +66,6 @@ cat > "$APP/Contents/Info.plist" <<PLIST
     <key>BuildTimestamp</key><string>${BUILD_TIMESTAMP}</string>
     <key>GitCommit</key><string>${GIT_COMMIT}</string>
     <key>NSLocalNetworkUsageDescription</key><string>CamBar needs local network access to reach your RTSP camera.</string>
-    <key>NSBonjourServices</key>
-    <array>
-        <string>_rtsp._tcp</string>
-    </array>
     <key>NSAppTransportSecurity</key>
     <dict>
         <key>NSAllowsLocalNetworking</key><true/>
@@ -165,13 +161,18 @@ if [[ -f "$ICON_TARGET" ]]; then
   cp "$ICON_TARGET" "$APP/Contents/Resources/Icon.icns"
 fi
 
-# Bundle helper binaries when available (ffmpeg/camsnap).
+# Bundle required helper binaries. go2rtc is part of the app architecture; do not
+# ship an app that falls back to the old slow playback path because packaging ran
+# outside the repo's devenv/Nix shell.
 BUNDLE_BIN_DIR="$APP/Contents/Resources/bin"
 mkdir -p "$BUNDLE_BIN_DIR"
-if command -v ffmpeg >/dev/null 2>&1; then
-  cp "$(command -v ffmpeg)" "$BUNDLE_BIN_DIR/ffmpeg"
-  chmod +x "$BUNDLE_BIN_DIR/ffmpeg"
+if ! command -v go2rtc >/dev/null 2>&1; then
+  echo "ERROR: go2rtc not found on PATH. Enter devenv shell or run: nix shell nixpkgs#go2rtc -c Scripts/package_app.sh" >&2
+  exit 1
 fi
+cp "$(command -v go2rtc)" "$BUNDLE_BIN_DIR/go2rtc"
+chmod +x "$BUNDLE_BIN_DIR/go2rtc"
+
 if command -v camsnap >/dev/null 2>&1; then
   cp "$(command -v camsnap)" "$BUNDLE_BIN_DIR/camsnap"
   chmod +x "$BUNDLE_BIN_DIR/camsnap"

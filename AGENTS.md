@@ -2,12 +2,19 @@
 
 Purpose: one-stop shop for agents to develop + debug CamBar fast.
 
+## North Star
+- CamBar is an ultraminimal, fast, menu-bar-only camera viewer.
+- The feed is the product: opening the menu bar app should show current live video fast, with no stale-frame catch-up weirdness.
+- Default answer to new UI/features is no unless they make live video faster, more reliable, or simpler.
+- Use the Build macOS Apps plugin/skills for macOS lifecycle, SwiftUI/AppKit, menu-bar UI, packaging, signing, and debugging work.
+
 ## What CamBar is
 - Tiny macOS menubar RTSP viewer.
-- Pipeline: RTSP -> ffmpeg -> local HLS -> AVPlayer.
-- Dual stream policy:
-  - small/popover: preview stream `/Streaming/Channels/102` when derivable
-  - large/popout: main stream `/Streaming/Channels/101`
+- Pipeline: RTSP camera -> bundled go2rtc -> direct WebKit video surface.
+- Stream policy:
+  - the main stream `/Streaming/Channels/101` is warmed at launch/login
+  - normal playback must not use ffmpeg, HLS files, or AVPlayer
+  - old fallback playback paths should be deleted, not preserved
 
 ## 60-second bootstrap
 ```bash
@@ -24,25 +31,23 @@ RTSP resolution order:
 2. `~/.config/camsnap/config.yaml`
 
 Debug env:
-- `CAMBAR_DEBUG_HTTP=1` -> HLS request logging
+- `CAMBAR_OPEN_WINDOW=1` -> opens the popout after relay/view warmup for visual testing
 
 ## Architecture map (read this before edits)
 - `Sources/CamBar/main.swift` + `AppDelegate.swift`
   - app lifecycle, menubar app wiring
 - `Sources/CamBar/ContentView.swift`
-  - popover UI + primary app state
-- `Sources/CamBar/LiveVideoView.swift`
-  - AVPlayer host view
+  - minimal popover UI
+- `Sources/CamBar/Go2RTCVideoView.swift`
+  - direct live video WebKit surface and prewarmed menu/window views
 - `Sources/CamBar/CameraWindowController.swift`
   - large/popout window behavior
-- `Sources/CamBar/CameraFrameProvider.swift`
-  - ffmpeg lifecycle + stream session orchestration
-- `Sources/CamBar/HLSServer.swift`
-  - local HLS file/serve behavior
-- `Sources/CamBar/StreamStatusView.swift`
-  - shared status UI component
+- `Sources/CamBar/Go2RTCRelayController.swift`
+  - bundled go2rtc lifecycle and localhost config
 - `Sources/CamBarCore/StreamSourceResolver.swift`
-  - URL/config parsing, stream derivation (`101` <-> `102`), path resolution
+  - URL/config parsing and executable path resolution
+- `Sources/CamBarCore/DirectStreamTelemetry.swift`
+  - local JSONL timing log
 - `Tests/CamBarTests/CamBarTests.swift`
   - resolver + behavior tests
 
@@ -64,7 +69,7 @@ nc -zv 192.168.1.249 554
 Interpretation:
 - ping fails -> routing/ACL/subnet-router problem
 - ping ok + port fails -> camera/RTSP path/firewall problem
-- ping ok + port ok + app fails -> CamBar/ffmpeg/HLS/app logic
+- ping ok + port ok + app fails -> CamBar/go2rtc/WebKit app logic
 
 ## Travel/remote notes (Tailscale)
 - Subnet router != exit node.
@@ -79,8 +84,8 @@ route -n get 192.168.1.249 | rg 'interface|gateway|flags'
 ## Done criteria before handoff
 - `./Scripts/compile_and_run.sh --test` passes.
 - App launches and plays stream in:
-  - small mode (preview/102 when available)
-  - large mode (main/101)
+  - menu popover
+  - popout window
 - No secret leakage in diffs/log statements.
 - Summary includes root cause, fix, and how it was verified.
 

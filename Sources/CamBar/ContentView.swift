@@ -1,152 +1,31 @@
-import AVFoundation
 import SwiftUI
 
 struct ContentView: View {
-    enum VideoMode: String, Equatable {
-        case small
-        case large
-
-        static let defaultsKey = "cambar.videoMode"
-
-        static func fromStoredValue(_ value: String?) -> VideoMode {
-            guard let value, let mode = VideoMode(rawValue: value) else {
-                return .small
-            }
-            return mode
-        }
-
-        var videoSize: CGSize {
-            switch self {
-            case .small:
-                return CGSize(width: 672, height: 380)
-            case .large:
-                return CGSize(width: 1344, height: 760)
-            }
-        }
-
-        var popoverSize: CGSize {
-            switch self {
-            case .small:
-                return CGSize(width: 696, height: 468)
-            case .large:
-                return CGSize(width: 1368, height: 848)
-            }
-        }
-
-        var toggleTitle: String {
-            switch self {
-            case .small: return "Make Bigger"
-            case .large: return "Make Smaller"
-            }
-        }
-
-        var toggled: VideoMode {
-            switch self {
-            case .small: return .large
-            case .large: return .small
-            }
-        }
-    }
-
-    @ObservedObject var previewProvider: CameraFrameProvider
-    @ObservedObject var mainProvider: CameraFrameProvider
+    let relayAvailable: Bool
+    let videoSize: CGSize
     let onOpenWindow: () -> Void
-    let onVideoModeChanged: (VideoMode) -> Void
-
-    @State private var videoMode: VideoMode
-
-    init(
-        previewProvider: CameraFrameProvider,
-        mainProvider: CameraFrameProvider,
-        initialVideoMode: VideoMode = .small,
-        onOpenWindow: @escaping () -> Void,
-        onVideoModeChanged: @escaping (VideoMode) -> Void
-    ) {
-        self.previewProvider = previewProvider
-        self.mainProvider = mainProvider
-        self.onOpenWindow = onOpenWindow
-        self.onVideoModeChanged = onVideoModeChanged
-        _videoMode = State(initialValue: initialVideoMode)
-    }
-
-    private var activeProvider: CameraFrameProvider {
-        videoMode == .small ? previewProvider : mainProvider
-    }
-
-    private var displayedProvider: CameraFrameProvider {
-        if videoMode == .large, mainProvider.player == nil, previewProvider.player != nil {
-            return previewProvider
-        }
-        return activeProvider
-    }
-
-    private var loadingLargeStreamMessage: String? {
-        guard videoMode == .large, mainProvider.player == nil, previewProvider.player != nil else {
-            return nil
-        }
-        if mainProvider.errorMessage != nil {
-            return "Main stream unavailable. Showing preview."
-        }
-        return "Loading full resolution..."
-    }
 
     var body: some View {
-        VStack(spacing: 10) {
-            ZStack {
-                if let player = displayedProvider.player {
-                    LiveVideoView(player: player)
-                } else if let error = activeProvider.errorMessage {
-                    VStack(spacing: 6) {
-                        Text("Camera unavailable")
-                            .font(.headline)
-                        Text(error)
-                            .font(.caption)
-                            .multilineTextAlignment(.center)
-                    }
+        ZStack(alignment: .bottomTrailing) {
+            if relayAvailable {
+                Go2RTCVideoView(surface: "menu")
+            } else {
+                Text("Camera unavailable")
+                    .font(.callout.weight(.semibold))
                     .foregroundColor(.white)
-                    .padding(16)
-                } else {
-                    Text("Waiting for stream…")
-                        .foregroundColor(.white)
-                }
-
-                if let loadingLargeStreamMessage {
-                    Text(loadingLargeStreamMessage)
-                        .font(.caption.weight(.semibold))
-                        .foregroundColor(.white)
-                        .padding(.horizontal, 12)
-                        .padding(.vertical, 6)
-                        .background(.black.opacity(0.65), in: Capsule())
-                        .padding(16)
-                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
-                }
             }
-            .frame(width: videoMode.videoSize.width, height: videoMode.videoSize.height)
-            .background(Color.black.opacity(0.9))
-            .cornerRadius(8)
 
-            StreamStatusView(
-                sourceURLMasked: displayedProvider.sourceURLMasked,
-                lagSeconds: displayedProvider.lagSeconds,
-                lastUpdated: displayedProvider.lastUpdated
-            )
-
-            HStack {
-                Button(videoMode.toggleTitle) {
-                    videoMode = videoMode.toggled
-                }
-                Button("Pop Out") {
-                    onOpenWindow()
-                }
-                Spacer()
+            Button {
+                onOpenWindow()
+            } label: {
+                Image(systemName: "arrow.up.left.and.arrow.down.right")
             }
+            .buttonStyle(.bordered)
+            .controlSize(.small)
+            .help("Open window")
+            .padding(10)
         }
-        .padding(12)
-        .onAppear {
-            onVideoModeChanged(videoMode)
-        }
-        .onChange(of: videoMode) { _, newMode in
-            onVideoModeChanged(newMode)
-        }
+        .frame(width: videoSize.width, height: videoSize.height)
+        .background(Color.black)
     }
 }

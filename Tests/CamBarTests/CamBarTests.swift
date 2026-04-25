@@ -2,33 +2,38 @@ import XCTest
 import CamBarCore
 
 final class CamBarTests: XCTestCase {
-    func testDerivePreviewRTSPURLFromMainChannel() {
-        let main = "rtsp://admin:secret@192.168.1.249:554/Streaming/Channels/101"
-
-        let preview = StreamSourceResolver.derivePreviewRTSPURL(from: main)
-
-        XCTAssertEqual(preview, "rtsp://admin:secret@192.168.1.249:554/Streaming/Channels/102")
-    }
-
-    func testSelectRTSPURLFallsBackToMainWhenPreviewUnavailable() {
-        let main = "rtsp://admin:secret@192.168.1.249:554/Streaming/Channels/101"
-
-        let selected = StreamSourceResolver.selectRTSPURL(
-            primary: main,
-            requestedVariant: .preview,
-            previewStreamKnownUnavailable: true
-        )
-
-        XCTAssertEqual(selected.url, main)
-        XCTAssertEqual(selected.variant, .main)
-    }
-
     func testMaskRtspURLHidesPassword() {
         let raw = "rtsp://admin:secret@192.168.1.249:554/Streaming/Channels/101"
 
         let masked = StreamSourceResolver.maskRtspURL(raw)
 
         XCTAssertEqual(masked, "rtsp://admin:***@192.168.1.249:554/Streaming/Channels/101")
+    }
+
+    func testRedactRtspCredentialsInLogText() {
+        let log = "Input #0, rtsp, from 'rtsp://admin:secret@192.168.1.249:554/Streaming/Channels/101':"
+
+        let redacted = StreamSourceResolver.redactRtspCredentials(in: log)
+
+        XCTAssertEqual(
+            redacted,
+            "Input #0, rtsp, from 'rtsp://admin:***@192.168.1.249:554/Streaming/Channels/101':"
+        )
+        XCTAssertFalse(redacted.contains("secret"))
+    }
+
+    func testDirectStreamTelemetryRedactsDetail() throws {
+        DirectStreamTelemetry.reset()
+
+        DirectStreamTelemetry.record(
+            component: "test",
+            event: "sample",
+            detail: "rtsp://admin:secret@192.168.1.249:554/Streaming/Channels/101"
+        )
+
+        let text = try String(contentsOf: DirectStreamTelemetry.logURL, encoding: .utf8)
+        XCTAssertTrue(text.contains("admin:***@192.168.1.249"))
+        XCTAssertFalse(text.contains("secret"))
     }
 
     func testLoadCameraConfigParsesFirstCamera() throws {
@@ -60,7 +65,6 @@ final class CamBarTests: XCTestCase {
         XCTAssertEqual(config?.protocolName, "rtsp")
         XCTAssertEqual(config?.username, "admin")
         XCTAssertEqual(config?.password, "secret")
-        XCTAssertEqual(config?.rtspTransport, "tcp")
         XCTAssertEqual(config?.stream, "Streaming/Channels/101")
     }
 
@@ -72,7 +76,6 @@ final class CamBarTests: XCTestCase {
             protocolName: "rtsp",
             username: "admin",
             password: "secret",
-            rtspTransport: "tcp",
             stream: "Streaming/Channels/101"
         )
 

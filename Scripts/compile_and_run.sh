@@ -8,8 +8,7 @@ APP_BUNDLE="${ROOT_DIR}/${APP_NAME}.app"
 APP_PROCESS_PATTERN="${APP_NAME}.app/Contents/MacOS/${APP_NAME}"
 DEBUG_PROCESS_PATTERN="${ROOT_DIR}/.build/debug/${APP_NAME}"
 RELEASE_PROCESS_PATTERN="${ROOT_DIR}/.build/release/${APP_NAME}"
-FFMPEG_APP_PATTERN="${APP_NAME}.app/Contents/Resources/bin/ffmpeg"
-FFMPEG_HLS_PATTERN="${HOME}/Library/Caches/${APP_NAME}/hls/master.m3u8"
+GO2RTC_APP_PATTERN="${APP_NAME}.app/Contents/Resources/bin/go2rtc"
 RUN_TESTS=0
 RELEASE_ARCHES=""
 
@@ -32,8 +31,7 @@ log "==> Killing existing ${APP_NAME} instances"
 pkill -f "${APP_PROCESS_PATTERN}" 2>/dev/null || true
 pkill -f "${DEBUG_PROCESS_PATTERN}" 2>/dev/null || true
 pkill -f "${RELEASE_PROCESS_PATTERN}" 2>/dev/null || true
-pkill -f "${FFMPEG_APP_PATTERN}" 2>/dev/null || true
-pkill -f "${FFMPEG_HLS_PATTERN}" 2>/dev/null || true
+pkill -f "${GO2RTC_APP_PATTERN}" 2>/dev/null || true
 pkill -x "${APP_NAME}" 2>/dev/null || true
 
 if [[ "${RUN_TESTS}" == "1" ]]; then

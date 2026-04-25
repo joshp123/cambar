@@ -10,13 +10,14 @@
 
 ## The Magic
 
-- **Menubar first.** A lightweight popover for quick checks, plus a full window for full-res viewing.
-- **No cloud.** Everything is local: RTSP -> ffmpeg -> HLS -> AVPlayer.
+- **Menubar first.** A lightweight popover for quick checks, plus a full window when needed.
+- **Launches at login.** Once opened as a packaged app, CamBar registers itself with macOS Login Items.
+- **No cloud.** Everything is local: RTSP camera -> bundled go2rtc -> direct live video surface.
 - **Boring by design.** No auth flows, no accounts, no fluff. Just the camera.
 
 ## What it does
 
-CamBar reads your RTSP URL (from `CAMBAR_RTSP_URL` or camsnap config), starts `ffmpeg` to generate HLS segments, then plays them in a menubar popover and a standard window. In small mode it prefers Hikvision substream (`.../Channels/102`) when derivable, falling back to main stream (`.../Channels/101`) if unavailable. It keeps the preview stream warm, starts the full-res stream only when the UI needs it, and stays pinned to the live edge so the feed stays current.
+CamBar reads your RTSP URL from `CAMBAR_RTSP_URL` or `~/.config/camsnap/config.yaml`, starts bundled `go2rtc`, warms the main camera stream at launch/login, and shows that already-running stream in the menu bar. Normal playback does not use `ffmpeg`, HLS files, or AVPlayer.
 
 ## Why
 
@@ -24,16 +25,17 @@ I wanted to know when the postman is at the door. The vendor app for this camera
 
 ## First run
 
-- Open the menubar popover.
+- Open the menubar popover after the app has had a few seconds to warm the stream.
 - Set `CAMBAR_RTSP_URL` if you want to override camera discovery.
-- The stream should start within a second or two.
+- The stream should already be live when the popover opens.
+- macOS may show CamBar under System Settings -> General -> Login Items if approval is needed.
 
 ## Requirements
 
 - macOS 14+
 - A reachable RTSP camera
 
-If you build from source, `ffmpeg` (and optionally `camsnap`) will be auto‑bundled into the app at package time when they’re available on PATH. No manual wiring required.
+If you build from source, `go2rtc` must be on `PATH` at package time and is bundled into the app. The repo's `devenv.nix` provides it.
 
 ## Run locally
 
@@ -51,15 +53,19 @@ Debug overrides:
 
 ```bash
 export CAMBAR_RTSP_URL="rtsp://user:pass@camera-host:554/Streaming/Channels/101"
-export CAMBAR_DEBUG_HTTP=1  # enables HLS request logging to requests.log
-export CAMBAR_KEEP_MAIN_STREAM_WARM=1  # keeps the main stream hot for instant large/open, with background CPU cost
 ```
 
 If neither source is available, startup shows an error with the missing path.
 
 ## Packaging
 
-`Scripts/package_app.sh` bundles `ffmpeg` and `camsnap` into the app if they are available on PATH at build time. The runtime will prefer bundled binaries, then fall back to PATH.
+`Scripts/package_app.sh` requires `go2rtc` on `PATH` and bundles it into `CamBar.app/Contents/Resources/bin/go2rtc`. Use:
+
+```bash
+nix shell nixpkgs#go2rtc -c ./Scripts/compile_and_run.sh --test
+```
+
+Timing telemetry is written to `~/Library/Caches/CamBar/direct/direct-stream-events.jsonl`.
 
 ## Zero to MVP (anonymized prompts)
 
@@ -115,14 +121,14 @@ Repo: CamBar
 
 What the app does:
 - Menubar popover with live feed
-- Optional full-size window for full-res viewing
-- Uses ffmpeg to produce HLS locally, then AVPlayer for playback
-- Stores settings inside the app (no external config required)
+- Optional full-size window
+- Bundles go2rtc and prewarms the main RTSP stream at app launch/login
+- Renders the warmed stream directly; no normal-path ffmpeg/HLS/AVPlayer
 
 What I need you to do:
 1) Build and run the app
 2) Set CAMBAR_RTSP_URL (or verify camsnap config)
-3) Keep playback on the live edge (no drifting/stalls)
+3) Verify warm menu open is effectively instant
 4) Ensure no credentials are committed
 
 Notes:

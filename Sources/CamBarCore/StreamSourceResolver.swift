@@ -1,11 +1,6 @@
 import Foundation
 
 public enum StreamSourceResolver {
-    public enum StreamVariant: Equatable {
-        case main
-        case preview
-    }
-
     public struct CameraConfig {
         public var name: String?
         public var host: String?
@@ -13,7 +8,6 @@ public enum StreamSourceResolver {
         public var protocolName: String?
         public var username: String?
         public var password: String?
-        public var rtspTransport: String?
         public var stream: String?
 
         public init(
@@ -23,7 +17,6 @@ public enum StreamSourceResolver {
             protocolName: String? = nil,
             username: String? = nil,
             password: String? = nil,
-            rtspTransport: String? = nil,
             stream: String? = nil
         ) {
             self.name = name
@@ -32,7 +25,6 @@ public enum StreamSourceResolver {
             self.protocolName = protocolName
             self.username = username
             self.password = password
-            self.rtspTransport = rtspTransport
             self.stream = stream
         }
     }
@@ -98,11 +90,6 @@ public enum StreamSourceResolver {
         return userDefaultString("rtspURL")
     }
 
-    public static func displayName(from rtspURL: String) -> String? {
-        guard let url = URL(string: rtspURL) else { return nil }
-        return url.host
-    }
-
     public static func maskRtspURL(_ raw: String) -> String {
         guard var components = URLComponents(string: raw) else {
             return raw
@@ -113,47 +100,24 @@ public enum StreamSourceResolver {
         return components.string ?? raw
     }
 
-    public static func selectRTSPURL(
-        primary: String,
-        requestedVariant: StreamVariant,
-        previewStreamKnownUnavailable: Bool
-    ) -> (url: String, variant: StreamVariant) {
-        guard requestedVariant == .preview,
-              !previewStreamKnownUnavailable,
-              let preview = derivePreviewRTSPURL(from: primary) else {
-            return (primary, .main)
+    public static func redactRtspCredentials(in data: Data) -> Data {
+        guard let text = String(data: data, encoding: .utf8) else {
+            return data
         }
-        return (preview, .preview)
+        return Data(redactRtspCredentials(in: text).utf8)
     }
 
-    public static func derivePreviewRTSPURL(from primary: String) -> String? {
-        guard var components = URLComponents(string: primary) else {
-            return nil
+    public static func redactRtspCredentials(in text: String) -> String {
+        let pattern = #"rtsp://([^:\s/@]+):([^@\s]+)@"#
+        guard let regex = try? NSRegularExpression(pattern: pattern) else {
+            return text
         }
-        let hadLeadingSlash = components.percentEncodedPath.hasPrefix("/")
-        var segments = components.percentEncodedPath
-            .split(separator: "/", omittingEmptySubsequences: true)
-            .map(String.init)
-
-        guard segments.count >= 2 else { return nil }
-        for index in 0..<(segments.count - 1) {
-            let current = segments[index].lowercased()
-            guard current == "channels", segments[index + 1] == "101" else {
-                continue
-            }
-            segments[index + 1] = "102"
-            var updatedPath = segments.joined(separator: "/")
-            if hadLeadingSlash {
-                updatedPath = "/" + updatedPath
-            }
-            components.percentEncodedPath = updatedPath
-            return components.string
-        }
-        return nil
-    }
-
-    public static func loadCameraName(from url: URL) -> String? {
-        loadCameraConfig(from: url)?.name
+        let range = NSRange(text.startIndex..<text.endIndex, in: text)
+        return regex.stringByReplacingMatches(
+            in: text,
+            range: range,
+            withTemplate: "rtsp://$1:***@"
+        )
     }
 
     public static func loadCameraConfig(from url: URL) -> CameraConfig? {
@@ -186,7 +150,6 @@ public enum StreamSourceResolver {
             case "protocol": current.protocolName = value
             case "username": current.username = value
             case "password": current.password = value
-            case "rtsp_transport": current.rtspTransport = value
             case "stream": current.stream = value
             default: break
             }
@@ -216,7 +179,7 @@ public enum StreamSourceResolver {
         return "\(scheme)://\(userInfo)\(host):\(port)\(path)"
     }
 
-    public static func makeHLSFolderURL(namespace: String) -> URL {
+    public static func makeCacheFolderURL(namespace: String) -> URL {
         let caches = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)
             .first ?? URL(fileURLWithPath: NSTemporaryDirectory())
         let folder = caches.appendingPathComponent("CamBar", isDirectory: true)
