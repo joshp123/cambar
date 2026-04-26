@@ -53,7 +53,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         popover.delegate = self
         popover.behavior = .transient
         let initialPopoverSize = bestPopoverVideoSize(anchorButton: statusItem.button)
-        popover.contentSize = initialPopoverSize
+        popover.contentSize = ContentView.contentSize(forVideoSize: initialPopoverSize)
         popover.contentViewController = NSHostingController(
             rootView: ContentView(
                 relayAvailable: relayStarted,
@@ -82,7 +82,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         guard let button = statusItem.button else { return }
         DirectStreamTelemetry.record(component: "app", event: "menu_open_requested", surface: "menu")
         let size = bestPopoverVideoSize(anchorButton: button)
-        popover.contentSize = size
+        popover.contentSize = ContentView.contentSize(forVideoSize: size)
         if let hosting = popover.contentViewController as? NSHostingController<ContentView> {
             hosting.rootView = ContentView(
                 relayAvailable: relayAvailable,
@@ -112,8 +112,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     private func bestPopoverVideoSize(anchorButton: NSStatusBarButton?) -> NSSize {
         let screen = anchorButton?.window?.screen ?? NSScreen.main
         let visible = screen?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1280, height: 720)
-        let maxWidth = max(320, visible.width - 80)
-        let maxHeight = max(180, visible.height - 120)
+        let maxWidth = max(320, visible.width - 80 - ContentView.videoBorderWidth * 2)
+        let maxHeight = max(180, visible.height - 120 - ContentView.videoBorderWidth * 2)
         let scale = min(1, maxWidth / nativeVideoSize.width, maxHeight / nativeVideoSize.height)
         return NSSize(
             width: floor(nativeVideoSize.width * scale),
@@ -121,8 +121,71 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         )
     }
 
-    func popoverWillShow(_ notification: Notification) {
-        DirectStreamTelemetry.record(component: "app", event: "menu_will_show", surface: "menu")
+    func popoverDidShow(_ notification: Notification) {
+        DirectStreamTelemetry.record(component: "app", event: "menu_did_show", surface: "menu")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in
+            self?.applyConcentricInnerClip()
+        }
+    }
+
+    private func applyConcentricInnerClip() {
+        guard let window = popover.contentViewController?.view.window else { return }
+        guard let frameView = window.contentView?.superview else { return }
+        var maskLayer: CAShapeLayer?
+        var layer: CALayer? = frameView.layer
+        while let l = layer {
+            if let m = l.mask as? CAShapeLayer {
+                maskLayer = m
+                break
+            }
+            layer = l.superlayer
+        }
+        guard let shape = maskLayer, let path = shape.path else { return }
+        let bbox = path.boundingBoxOfPath
+        let border = ContentView.videoBorderWidth
+        let scaleX = (bbox.width - 2 * border) / bbox.width
+        let scaleY = (bbox.height - 2 * border) / bbox.height
+        // Direct affine: p' = (scale, scale) * p + offset
+        // Maps path bbox -> WKWebView bbox (0..(W-2b), 0..(H-2b)).
+        let tx = -scaleX * bbox.minX + bbox.midX * (1 - scaleX) - border
+        let ty = -scaleY * bbox.minY + bbox.midY * (1 - scaleY) - border
+        var t = CGAffineTransform(a: scaleX, b: 0, c: 0, d: scaleY, tx: tx, ty: ty)
+        guard let inset = path.copy(using: &t) else { return }
+        let svg = svgPathString(from: inset)
+        Go2RTCVideoView.applyClipPath(surface: "menu", svgPath: svg)
+    }
+
+    private func svgPathString(from path: CGPath) -> String {
+        var result = ""
+        path.applyWithBlock { elementPtr in
+            let element = elementPtr.pointee
+            switch element.type {
+            case .moveToPoint:
+                let p = element.points[0]
+                result += "M\(fmt(p.x)),\(fmt(p.y)) "
+            case .addLineToPoint:
+                let p = element.points[0]
+                result += "L\(fmt(p.x)),\(fmt(p.y)) "
+            case .addQuadCurveToPoint:
+                let cp = element.points[0]
+                let p = element.points[1]
+                result += "Q\(fmt(cp.x)),\(fmt(cp.y)) \(fmt(p.x)),\(fmt(p.y)) "
+            case .addCurveToPoint:
+                let cp1 = element.points[0]
+                let cp2 = element.points[1]
+                let p = element.points[2]
+                result += "C\(fmt(cp1.x)),\(fmt(cp1.y)) \(fmt(cp2.x)),\(fmt(cp2.y)) \(fmt(p.x)),\(fmt(p.y)) "
+            case .closeSubpath:
+                result += "Z "
+            @unknown default:
+                break
+            }
+        }
+        return result
+    }
+
+    private func fmt(_ v: CGFloat) -> String {
+        String(format: "%.3f", Double(v))
     }
 
     func popoverDidClose(_ notification: Notification) {

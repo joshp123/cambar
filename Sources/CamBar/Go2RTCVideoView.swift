@@ -31,6 +31,10 @@ struct Go2RTCVideoView: NSViewRepresentable {
         Go2RTCWebViewPool.shared.isShowing(surface: surface)
     }
 
+    static func applyClipPath(surface: String, svgPath: String) {
+        Go2RTCWebViewPool.shared.applyClipPath(surface: surface, svgPath: svgPath)
+    }
+
     func makeNSView(context: Context) -> WKWebView {
         Go2RTCWebViewPool.shared.webView(surface: surface)
     }
@@ -77,6 +81,24 @@ private final class Go2RTCWebViewPool {
     func isShowing(surface: String) -> Bool {
         guard let entry = entries[surface] else { return false }
         return entry.warmWindow.frame.origin.x > -1000
+    }
+
+    func applyClipPath(surface: String, svgPath: String) {
+        guard let entry = entries[surface] else { return }
+        let escaped = svgPath.replacingOccurrences(of: "'", with: "\\'")
+        let js = """
+        (function() {
+          const path = '\(escaped)';
+          let style = document.getElementById('cambar-clip-style');
+          if (!style) {
+            style = document.createElement('style');
+            style.id = 'cambar-clip-style';
+            document.head.appendChild(style);
+          }
+          style.textContent = `simple-video, video { clip-path: path('${path}'); border-radius: 0 !important; }`;
+        })();
+        """
+        entry.webView.evaluateJavaScript(js)
     }
 
     func webView(surface: String) -> WKWebView {
@@ -146,13 +168,22 @@ private final class Go2RTCWebViewPool {
         <head>
           <meta name="viewport" content="width=device-width, initial-scale=1">
           <style>
-            html, body, simple-video {
+            html, body {
               width: 100%;
               height: 100%;
               margin: 0;
               padding: 0;
               overflow: hidden;
-              background: #000;
+              background: transparent;
+            }
+            simple-video {
+              display: block;
+              width: 100%;
+              height: 100%;
+              overflow: hidden;
+              background: transparent;
+              transform: translateZ(0);
+              isolation: isolate;
             }
             video {
               width: 100%;
