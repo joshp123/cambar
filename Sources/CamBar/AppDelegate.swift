@@ -10,15 +10,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     private let relayController = Go2RTCRelayController()
     private var windowController: CameraWindowController?
     private var wakeObserver: NSObjectProtocol?
-    private var relayAvailable = false
+    private var menuProbeToken = 0
+    private var debugPopoverRemaining = 0
+    private var debugPopoverVisibleSeconds: TimeInterval = 2
     private let nativeVideoSize = CGSize(width: 2688, height: 1520)
+    private lazy var uiState = CamBarUIState(videoSize: bestPopoverVideoSize(anchorButton: statusItem.button))
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         DirectStreamTelemetry.reset()
         DirectStreamTelemetry.record(component: "app", event: "launch")
         loginItemController.ensureRegistered()
         let relayStarted = relayController.startIfAvailable()
-        relayAvailable = relayStarted
         wakeObserver = NSWorkspace.shared.notificationCenter.addObserver(
             forName: NSWorkspace.didWakeNotification,
             object: nil,
@@ -26,19 +28,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         ) { [weak self] _ in
             Task { @MainActor [weak self] in
                 guard let self else { return }
-                self.relayAvailable = self.relayController.startIfAvailable()
+                self.refreshRelayAfterWake()
             }
         }
         if relayStarted {
-            relayController.waitForMainReady { _ in
+            relayController.waitForMainReady { [weak self] ready in
                 DispatchQueue.main.async {
-                    DirectStreamTelemetry.record(component: "app", event: "relay_warm_wait_finished")
-                    Go2RTCVideoView.prewarmAll()
-                    if ProcessInfo.processInfo.environment["CAMBAR_OPEN_WINDOW"] == "1" {
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak self] in
-                            self?.openWindow()
-                        }
-                    }
+                    self?.finishRelayWarm(ready: ready)
                 }
             }
         }
@@ -53,16 +49,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         popover.delegate = self
         popover.behavior = .transient
         let initialPopoverSize = bestPopoverVideoSize(anchorButton: statusItem.button)
+        uiState.videoSize = initialPopoverSize
         popover.contentSize = ContentView.contentSize(forVideoSize: initialPopoverSize)
         popover.contentViewController = NSHostingController(
             rootView: ContentView(
-                relayAvailable: relayStarted,
-                videoSize: initialPopoverSize,
+                state: uiState,
                 onOpenWindow: { [weak self] in
                     self?.openWindow()
                 }
             )
         )
+        if !relayStarted {
+            finishRelayWarm(ready: false, reason: "launch_start_failed")
+        }
 
     }
 
@@ -74,25 +73,122 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         relayController.stop()
     }
 
+    private func refreshRelayAfterWake() {
+        Go2RTCVideoView.stop(surface: "menu", reason: "relay_refresh")
+        uiState.relayAvailable = false
+        uiState.videoSize = bestPopoverVideoSize(anchorButton: statusItem.button)
+        let relayStarted = relayController.startIfAvailable()
+        guard relayStarted else {
+            finishRelayWarm(ready: false, reason: "wake", runDebugHooks: false)
+            return
+        }
+        relayController.waitForMainReady { [weak self] ready in
+            DispatchQueue.main.async {
+                self?.finishRelayWarm(ready: ready, reason: "wake", runDebugHooks: false)
+            }
+        }
+    }
+
+    private func finishRelayWarm(ready: Bool, reason: String = "launch", runDebugHooks: Bool = true) {
+        uiState.relayAvailable = ready
+        uiState.videoSize = bestPopoverVideoSize(anchorButton: statusItem.button)
+        DirectStreamTelemetry.record(
+            component: "app",
+            event: ready ? "relay_warm_wait_finished" : "relay_warm_wait_failed",
+            detail: "reason=\(reason)"
+        )
+        if ready {
+            warmMenuVideo()
+        }
+        guard runDebugHooks else { return }
+        if ProcessInfo.processInfo.environment["CAMBAR_OPEN_WINDOW"] == "1" {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak self] in
+                self?.openWindow()
+            }
+        }
+        let debugPopoverDelay = TimeInterval(ProcessInfo.processInfo.environment["CAMBAR_DEBUG_POPOVER_START_DELAY_SECONDS"] ?? "1") ?? 1
+        if ProcessInfo.processInfo.environment["CAMBAR_OPEN_POPOVER"] == "1" {
+            DispatchQueue.main.asyncAfter(deadline: .now() + debugPopoverDelay) { [weak self] in
+                self?.showPopoverFromStatusItem()
+            }
+        }
+        if let cyclesValue = ProcessInfo.processInfo.environment["CAMBAR_DEBUG_POPOVER_CYCLES"],
+           let cycles = Int(cyclesValue),
+           cycles > 0 {
+            popover.behavior = .applicationDefined
+            debugPopoverRemaining = cycles
+            debugPopoverVisibleSeconds = TimeInterval(ProcessInfo.processInfo.environment["CAMBAR_DEBUG_POPOVER_VISIBLE_SECONDS"] ?? "2") ?? 2
+            DirectStreamTelemetry.record(
+                component: "app",
+                event: "debug_popover_behavior",
+                surface: "menu",
+                detail: "behavior=applicationDefined"
+            )
+            DispatchQueue.main.asyncAfter(deadline: .now() + debugPopoverDelay) { [weak self] in
+                self?.runNextDebugPopoverCycle()
+            }
+        }
+    }
+
     @objc private func togglePopover() {
         if popover.isShown {
             popover.performClose(nil)
             return
         }
+        showPopoverFromStatusItem()
+    }
+
+    private func showPopoverFromStatusItem() {
         guard let button = statusItem.button else { return }
-        DirectStreamTelemetry.record(component: "app", event: "menu_open_requested", surface: "menu")
+        DirectStreamTelemetry.record(
+            component: "app",
+            event: "menu_open_requested",
+            surface: "menu",
+            detail: "active=\(NSApp.isActive)"
+        )
+        Go2RTCVideoView.markOpen(surface: "menu")
+        NSApp.activate(ignoringOtherApps: true)
+        let delay: TimeInterval = NSApp.isActive ? 0 : 0.05
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self, weak button] in
+            guard let self, let button else { return }
+            self.showPopover(relativeTo: button)
+        }
+    }
+
+    private func showPopover(relativeTo button: NSStatusBarButton) {
+        guard !popover.isShown else { return }
         let size = bestPopoverVideoSize(anchorButton: button)
         popover.contentSize = ContentView.contentSize(forVideoSize: size)
-        if let hosting = popover.contentViewController as? NSHostingController<ContentView> {
-            hosting.rootView = ContentView(
-                relayAvailable: relayAvailable,
-                videoSize: size,
-                onOpenWindow: { [weak self] in
-                    self?.openWindow()
-                }
-            )
-        }
+        uiState.videoSize = size
         popover.show(relativeTo: button.bounds, of: button, preferredEdge: .maxY)
+    }
+
+    private func warmMenuVideo() {
+        let size = uiState.videoSize
+        DispatchQueue.main.async {
+            self.popover.contentViewController?.view.layoutSubtreeIfNeeded()
+            Go2RTCVideoView.warm(surface: "menu", size: size)
+        }
+    }
+
+    private func runNextDebugPopoverCycle() {
+        guard debugPopoverRemaining > 0 else { return }
+        DirectStreamTelemetry.record(
+            component: "app",
+            event: "debug_popover_cycle",
+            surface: "menu",
+            detail: "remaining=\(debugPopoverRemaining)"
+        )
+        showPopoverFromStatusItem()
+        if debugPopoverRemaining == 1 {
+            return
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + debugPopoverVisibleSeconds) { [weak self] in
+            guard let self else { return }
+            if self.popover.isShown {
+                self.popover.performClose(nil)
+            }
+        }
     }
 
     private func openWindow() {
@@ -100,7 +196,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         if windowController == nil {
             windowController = CameraWindowController(
                 onClose: { [weak self] in
-                    Go2RTCVideoView.keepWarm(surface: "window")
+                    Go2RTCVideoView.stop(surface: "window", reason: "window_closed")
                     self?.windowController = nil
                 }
             )
@@ -123,8 +219,53 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
 
     func popoverDidShow(_ notification: Notification) {
         DirectStreamTelemetry.record(component: "app", event: "menu_did_show", surface: "menu")
+        startMenuVideoWhenPopoverReady(retry: 0)
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in
             self?.applyConcentricInnerClip()
+        }
+    }
+
+    private func startMenuVideoWhenPopoverReady(retry: Int) {
+        let ready = preparePopoverWindowForVideo(reason: "popover_did_show_retry_\(retry)")
+        guard ready || retry >= 5 else {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in
+                self?.startMenuVideoWhenPopoverReady(retry: retry + 1)
+            }
+            return
+        }
+        Go2RTCVideoView.start(surface: "menu")
+        menuProbeToken += 1
+        probeMenuVideo(reason: "popover_show", token: menuProbeToken)
+    }
+
+    private func preparePopoverWindowForVideo(reason: String) -> Bool {
+        NSApp.activate(ignoringOtherApps: true)
+        guard let window = popover.contentViewController?.view.window else {
+            DirectStreamTelemetry.record(
+                component: "app",
+                event: "popover_window_missing",
+                surface: "menu",
+                detail: "reason=\(reason)"
+            )
+            return false
+        }
+        window.makeKeyAndOrderFront(nil)
+        DirectStreamTelemetry.record(
+            component: "app",
+            event: "popover_window_ready",
+            surface: "menu",
+            detail: "reason=\(reason) visible=\(window.isVisible) key=\(window.isKeyWindow) main=\(window.isMainWindow) frame=\(Int(window.frame.width))x\(Int(window.frame.height))"
+        )
+        return window.isVisible && window.isKeyWindow
+    }
+
+    private func probeMenuVideo(reason: String, token: Int) {
+        Go2RTCVideoView.probe(surface: "menu", reason: reason)
+        for delay in [1.0, 3.0, 8.0] {
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+                guard let self, self.popover.isShown, self.menuProbeToken == token else { return }
+                Go2RTCVideoView.probe(surface: "menu", reason: "\(reason)+\(String(format: "%.0fs", delay))")
+            }
         }
     }
 
@@ -190,5 +331,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
 
     func popoverDidClose(_ notification: Notification) {
         DirectStreamTelemetry.record(component: "app", event: "menu_closed", surface: "menu")
+        menuProbeToken += 1
+        if debugPopoverRemaining > 1 {
+            debugPopoverRemaining -= 1
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+                self?.runNextDebugPopoverCycle()
+            }
+        } else if debugPopoverRemaining == 1 {
+            debugPopoverRemaining = 0
+        }
     }
 }

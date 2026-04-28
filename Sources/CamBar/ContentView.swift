@@ -1,23 +1,33 @@
 import SwiftUI
 
+@MainActor
+final class CamBarUIState: ObservableObject {
+    @Published var relayAvailable = false
+    @Published var videoSize: CGSize
+
+    init(videoSize: CGSize) {
+        self.videoSize = videoSize
+    }
+}
+
 struct ContentView: View {
     static let videoBorderWidth: CGFloat = 2
 
-    let relayAvailable: Bool
-    let videoSize: CGSize
+    @ObservedObject var state: CamBarUIState
     let onOpenWindow: () -> Void
 
     var body: some View {
         ZStack(alignment: .bottomTrailing) {
             Color.white
 
-            if relayAvailable {
+            if state.relayAvailable {
                 Go2RTCVideoView(surface: "menu")
+                    .frame(width: state.videoSize.width, height: state.videoSize.height)
                     .padding(Self.videoBorderWidth)
             } else {
                 Text("Camera unavailable")
                     .font(.callout.weight(.semibold))
-                    .foregroundColor(.white)
+                    .foregroundColor(.black)
             }
 
             Button {
@@ -41,6 +51,6 @@ struct ContentView: View {
     }
 
     private var contentSize: CGSize {
-        Self.contentSize(forVideoSize: videoSize)
+        Self.contentSize(forVideoSize: state.videoSize)
     }
 }

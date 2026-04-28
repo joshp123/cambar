@@ -16,17 +16,7 @@ final class Go2RTCRelayController: @unchecked Sendable {
     func startIfAvailable() -> Bool {
         queue.sync {
             if process != nil { return true }
-            DirectStreamTelemetry.record(component: "relay", event: "start_requested")
-            guard let go2rtcPath = StreamSourceResolver.resolveExecutablePath("go2rtc", overridePath: nil) else {
-                DirectStreamTelemetry.record(component: "relay", event: "go2rtc_not_found")
-                return false
-            }
-            guard let configURL = writeConfig() else {
-                DirectStreamTelemetry.record(component: "relay", event: "config_write_failed")
-                return false
-            }
-            killLegacyRelay(configURL: configURL)
-            return startProcess(go2rtcPath: go2rtcPath, configURL: configURL)
+            return startLocked(event: "start_requested")
         }
     }
 
@@ -93,6 +83,20 @@ final class Go2RTCRelayController: @unchecked Sendable {
         }
     }
 
+    private func startLocked(event: String) -> Bool {
+        DirectStreamTelemetry.record(component: "relay", event: event)
+        guard let go2rtcPath = StreamSourceResolver.resolveExecutablePath("go2rtc", overridePath: nil) else {
+            DirectStreamTelemetry.record(component: "relay", event: "go2rtc_not_found")
+            return false
+        }
+        guard let configURL = writeConfig() else {
+            DirectStreamTelemetry.record(component: "relay", event: "config_write_failed")
+            return false
+        }
+        killLegacyRelay(configURL: configURL)
+        return startProcess(go2rtcPath: go2rtcPath, configURL: configURL)
+    }
+
     private func startProcess(go2rtcPath: String, configURL: URL) -> Bool {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: go2rtcPath)
@@ -104,6 +108,12 @@ final class Go2RTCRelayController: @unchecked Sendable {
         process.terminationHandler = { [weak self] _ in
             guard let relay = self else { return }
             relay.queue.async {
+                DirectStreamTelemetry.record(
+                    component: "relay",
+                    event: "process_terminated",
+                    detail: "status=\(process.terminationStatus)"
+                )
+                guard relay.process === process else { return }
                 relay.closeLogOutput()
                 relay.process = nil
             }

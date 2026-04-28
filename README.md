@@ -53,6 +53,8 @@ Debug overrides:
 
 ```bash
 export CAMBAR_RTSP_URL="rtsp://user:pass@camera-host:554/Streaming/Channels/101"
+CAMBAR_OPEN_POPOVER=1 ./CamBar.app/Contents/MacOS/CamBar
+./Scripts/debug_popover.sh
 ```
 
 If neither source is available, startup shows an error with the missing path.
