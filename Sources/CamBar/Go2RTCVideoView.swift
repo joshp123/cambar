@@ -55,8 +55,7 @@ private final class Go2RTCWebViewPool {
 
     func keepWarm(surface: String) {
         guard let entry = entries[surface] else { return }
-        moveOffscreen(entry.warmWindow)
-        entry.warmWindow.orderFrontRegardless()
+        hideWarmWindow(entry.warmWindow)
         entry.telemetry.record("view_returned_to_warm_window")
     }
 
@@ -73,8 +72,7 @@ private final class Go2RTCWebViewPool {
 
     func hide(surface: String) {
         guard let entry = entries[surface] else { return }
-        moveOffscreen(entry.warmWindow)
-        entry.warmWindow.orderFrontRegardless()
+        hideWarmWindow(entry.warmWindow)
         entry.telemetry.record("window_hidden")
     }
 
@@ -142,13 +140,13 @@ private final class Go2RTCWebViewPool {
         window.isOpaque = true
         window.alphaValue = 1
         window.ignoresMouseEvents = true
-        window.collectionBehavior = [.canJoinAllSpaces, .stationary, .ignoresCycle]
+        window.collectionBehavior = [.stationary, .ignoresCycle]
         window.contentView = webView
-        window.orderFrontRegardless()
         return window
     }
 
-    private func moveOffscreen(_ window: NSWindow) {
+    private func hideWarmWindow(_ window: NSWindow) {
+        window.level = .normal
         window.setFrame(
             NSRect(
                 x: -10_000,
@@ -158,6 +156,7 @@ private final class Go2RTCWebViewPool {
             ),
             display: false
         )
+        window.orderOut(nil)
     }
 
     private static func html() -> String {
