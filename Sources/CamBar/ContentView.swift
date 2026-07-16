@@ -19,9 +19,8 @@ final class CamBarUIState {
 }
 
 struct ContentView: View {
-    static let popoverCornerRadius: CGFloat = 10
     static let contentInset: CGFloat = 6
-    static let videoCornerRadius = popoverCornerRadius - contentInset
+    static let videoCornerRadius: CGFloat = 4
 
     var state: CamBarUIState
     let playback: CameraPlaybackController
@@ -68,7 +67,6 @@ struct ContentView: View {
             .padding(Self.contentInset + 8)
         }
         .frame(width: contentSize.width, height: contentSize.height)
-        .clipShape(RoundedRectangle(cornerRadius: Self.popoverCornerRadius, style: .continuous))
     }
 
     static func contentSize(forVideoSize videoSize: CGSize) -> CGSize {

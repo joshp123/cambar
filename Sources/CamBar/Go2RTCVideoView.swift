@@ -374,8 +374,10 @@ private final class CameraWebView: WKWebView {
 @MainActor
 final class CameraVideoContainerView: NSView {
     private let cover = NSView()
+    private var fallbackCornerRadius: CGFloat
 
     init(cornerRadius: CGFloat) {
+        fallbackCornerRadius = cornerRadius
         super.init(frame: .zero)
         wantsLayer = true
         layer?.backgroundColor = NSColor.black.cgColor
@@ -392,14 +394,27 @@ final class CameraVideoContainerView: NSView {
 
     override var isFlipped: Bool { true }
 
+    @available(macOS 27.0, *)
+    override var cornerConfiguration: NSViewCornerConfiguration? {
+        .uniformCorners(radius: .containerConcentric)
+    }
+
+    @available(macOS 27.0, *)
+    override func viewDidChangeEffectiveCornerRadii() {
+        super.viewDidChangeEffectiveCornerRadii()
+        applyCornerRadius()
+    }
+
     override func layout() {
         super.layout()
+        applyCornerRadius()
         subviews.first { $0 is WKWebView }?.frame = bounds
         cover.frame = bounds
     }
 
     func setCornerRadius(_ radius: CGFloat) {
-        layer?.cornerRadius = radius
+        fallbackCornerRadius = radius
+        applyCornerRadius()
     }
 
     func attach(_ webView: WKWebView) {
@@ -411,6 +426,14 @@ final class CameraVideoContainerView: NSView {
 
     func showCover(_ show: Bool) {
         cover.isHidden = !show
+    }
+
+    private func applyCornerRadius() {
+        if #available(macOS 27.0, *), let radii = effectiveCornerRadii {
+            layer?.cornerRadius = radii.topLeft
+        } else {
+            layer?.cornerRadius = fallbackCornerRadius
+        }
     }
 }
 
