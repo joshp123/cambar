@@ -109,10 +109,8 @@ private final class TelemetryReader {
     func waitForLaunch(excluding previousSession: String?, timeout: TimeInterval) throws {
         try wait(timeout: timeout, description: "fresh launch telemetry") { events in
             guard let launch = events.last(where: {
-                $0.component == "app"
-                    && $0.event == "launch"
-                    && $0.sessionID != previousSession
-            }) else {
+                $0.component == "app" && $0.event == "launch"
+            }), launch.sessionID != previousSession else {
                 return false
             }
             self.sessionID = launch.sessionID
