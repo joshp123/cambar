@@ -196,6 +196,7 @@ private final class StatusItemDriver {
         defer { CGWarpMouseCursorPosition(originalLocation) }
 
         let target = CGPoint(x: frame.midX, y: frame.midY)
+        print("Clicking status item frame=\(NSStringFromRect(frame)) target=\(NSStringFromPoint(target))")
         guard let source = CGEventSource(stateID: .combinedSessionState),
               let moved = CGEvent(mouseEventSource: source, mouseType: .mouseMoved, mouseCursorPosition: target, mouseButton: .left),
               let down = CGEvent(mouseEventSource: source, mouseType: .leftMouseDown, mouseCursorPosition: target, mouseButton: .left),
@@ -204,6 +205,12 @@ private final class StatusItemDriver {
         }
         moved.post(tap: .cghidEventTap)
         usleep(30_000)
+        let movedLocation = CGEvent(source: nil)?.location ?? NSEvent.mouseLocation
+        guard frame.insetBy(dx: -2, dy: -2).contains(movedLocation) else {
+            throw SmokeError.message(
+                "cursor move missed status item: expected \(NSStringFromRect(frame)), found \(NSStringFromPoint(movedLocation))"
+            )
+        }
         down.post(tap: .cghidEventTap)
         usleep(40_000)
         up.post(tap: .cghidEventTap)
