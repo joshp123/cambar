@@ -67,7 +67,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
 
     private func configurePopover() {
         popover.delegate = self
-        popover.behavior = .transient
+        popover.behavior = .applicationDefined
         popover.animates = false
         let initialSize = bestPopoverVideoSize(anchorButton: statusItem.button)
         uiState.videoSize = initialSize
