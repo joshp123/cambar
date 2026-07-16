@@ -245,9 +245,12 @@ private final class TelemetryReader {
         if !contents.hasSuffix("\n"), !lines.isEmpty {
             lines.removeLast()
         }
-        return try lines.enumerated().map { index, line in
+        return try lines.enumerated().compactMap { index, line in
             do {
-                return try decoder.decode(TelemetryEvent.self, from: Data(line.utf8))
+                let data = Data(line.utf8)
+                let object = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+                guard object?["schema_version"] as? Int == 2 else { return nil }
+                return try decoder.decode(TelemetryEvent.self, from: data)
             } catch {
                 throw SmokeError.message("malformed telemetry row \(index + 1): \(error)")
             }
