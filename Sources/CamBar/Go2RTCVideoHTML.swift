@@ -52,6 +52,37 @@ extension CameraPlaybackController {
             }
 
             function watchFrames(video) {
+              function sampleFrame() {
+                try {
+                  const canvas = document.createElement('canvas');
+                  canvas.width = 32;
+                  canvas.height = 18;
+                  const context = canvas.getContext('2d', {willReadFrequently: true});
+                  context.drawImage(video, 0, 0, canvas.width, canvas.height);
+                  const pixels = context.getImageData(0, 0, canvas.width, canvas.height).data;
+                  let dark = 0;
+                  let color = 0;
+                  const total = pixels.length / 4;
+                  for (let index = 0; index < pixels.length; index += 4) {
+                    const red = pixels[index];
+                    const green = pixels[index + 1];
+                    const blue = pixels[index + 2];
+                    if (Math.max(red, green, blue) < 16) dark += 1;
+                    if (Math.max(red, green, blue) - Math.min(red, green, blue) > 12) color += 1;
+                  }
+                  const detail = JSON.stringify({
+                    darkRatio: dark / total,
+                    colorRatio: color / total
+                  });
+                  emit('frame_sample', {detail});
+                  if (dark / total > 0.98) {
+                    emit('black_frame_suspected', {detail});
+                  }
+                } catch (error) {
+                  emit('frame_sample_failed', {detail: String(error)});
+                }
+              }
+
               const onFrame = (_now, metadata) => {
                 lastFrameAt = performance.now();
                 stallReported = false;
@@ -74,6 +105,7 @@ extension CameraPlaybackController {
                       mediaTime: metadata.mediaTime
                     })
                   });
+                  setTimeout(sampleFrame, 0);
                 }
                 video.requestVideoFrameCallback(onFrame);
               };

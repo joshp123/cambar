@@ -126,14 +126,17 @@ final class CameraPlaybackController: NSObject, WKNavigationDelegate, WKScriptMe
         }
 
         let elapsed = body["elapsed_ms"] as? Int
-        DirectStreamTelemetry.record(
-            component: "video",
-            event: event,
-            stream: Go2RTCRelayController.mainStreamName,
-            surface: activeSurface?.rawValue,
-            elapsedMilliseconds: elapsed,
-            detail: body["detail"] as? String
-        )
+        let visibleStall = event == "frame_stalled" && activeSurface != nil && NSApp.isActive
+        if event != "frame_stalled" || visibleStall {
+            DirectStreamTelemetry.record(
+                component: "video",
+                event: event,
+                stream: Go2RTCRelayController.mainStreamName,
+                surface: activeSurface?.rawValue,
+                elapsedMilliseconds: elapsed,
+                detail: body["detail"] as? String
+            )
+        }
 
         switch event {
         case "first_frame":
@@ -163,7 +166,7 @@ final class CameraPlaybackController: NSObject, WKNavigationDelegate, WKScriptMe
         case "video_error":
             recover(reason: event)
         case "frame_stalled":
-            if activeSurface != nil, NSApp.isActive {
+            if visibleStall {
                 recover(reason: event)
             }
         default:

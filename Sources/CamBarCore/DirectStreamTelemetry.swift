@@ -1,8 +1,10 @@
 import Foundation
+import OSLog
 
 public enum DirectStreamTelemetry {
     private static let queue = DispatchQueue(label: "CamBar.direct-telemetry")
     private static let enabled = ProcessInfo.processInfo.environment["CAMBAR_DIAGNOSTICS"] == "1"
+    private static let logger = Logger(subsystem: "com.cambar", category: "stream")
 
     public static var logURL: URL {
         StreamSourceResolver.makeCacheFolderURL(namespace: "direct")
@@ -28,6 +30,14 @@ public enum DirectStreamTelemetry {
         elapsedMilliseconds: Int? = nil,
         detail: String? = nil
     ) {
+        let safeDetail = detail.map(StreamSourceResolver.redactRtspCredentials(in:))
+        var message = "component=\(component) event=\(event)"
+        if let stream { message += " stream=\(stream)" }
+        if let surface { message += " surface=\(surface)" }
+        if let elapsedMilliseconds { message += " elapsed_ms=\(elapsedMilliseconds)" }
+        if let safeDetail { message += " detail=\(safeDetail)" }
+        logger.info("\(message, privacy: .public)")
+
         guard enabled else { return }
         queue.async {
             var fields: [String: Any] = [
@@ -45,8 +55,8 @@ public enum DirectStreamTelemetry {
             if let elapsedMilliseconds {
                 fields["elapsed_ms"] = elapsedMilliseconds
             }
-            if let detail {
-                fields["detail"] = StreamSourceResolver.redactRtspCredentials(in: detail)
+            if let safeDetail {
+                fields["detail"] = safeDetail
             }
 
             guard JSONSerialization.isValidJSONObject(fields),
