@@ -56,6 +56,12 @@ final class Go2RTCRelayController {
     private var cleanedUpLegacyRelay = false
     private var preparedDiagnosticLog = false
     private let diagnosticsEnabled = ProcessInfo.processInfo.environment["CAMBAR_DIAGNOSTICS"] == "1"
+    private let healthSession: URLSession = {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
+        configuration.urlCache = nil
+        return URLSession(configuration: configuration)
+    }()
 
     init(retryPolicy: RelayRetryPolicy = RelayRetryPolicy()) {
         self.retryPolicy = retryPolicy
@@ -284,9 +290,9 @@ final class Go2RTCRelayController {
               let url = URL(string: "http://127.0.0.1:1984/api/streams?src=\(encoded)") else {
             return nil
         }
-        var request = URLRequest(url: url)
+        var request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData)
         request.timeoutInterval = 0.5
-        guard let (data, response) = try? await URLSession.shared.data(for: request),
+        guard let (data, response) = try? await healthSession.data(for: request),
               (response as? HTTPURLResponse)?.statusCode == 200 else {
             return nil
         }
