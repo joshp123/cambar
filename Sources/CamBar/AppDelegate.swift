@@ -67,6 +67,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     private func configurePopover() {
         popover.delegate = self
         popover.behavior = .transient
+        popover.animates = false
         let initialSize = bestPopoverVideoSize(anchorButton: statusItem.button)
         uiState.videoSize = initialSize
         popover.contentSize = ContentView.contentSize(forVideoSize: initialSize)
@@ -152,9 +153,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         )
     }
 
+    func popoverWillShow(_ notification: Notification) {
+        playbackController.show(.menu)
+    }
+
     func popoverDidShow(_ notification: Notification) {
         DirectStreamTelemetry.record(component: "app", event: "menu_did_show", surface: "menu")
-        playbackController.show(.menu)
     }
 
     func popoverDidClose(_ notification: Notification) {
