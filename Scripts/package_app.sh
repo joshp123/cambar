@@ -39,8 +39,12 @@ if [[ "$(lipo -archs "$PRODUCT")" != "$ARCH" ]]; then
 fi
 
 STAGING_ROOT="$ROOT/.build/package"
-STAGED_APP="$STAGING_ROOT/$APP_NAME.app"
+STAGED_APP="$STAGING_ROOT/$APP_NAME.app-staging"
 APP="$ROOT/$APP_NAME.app"
+if pgrep -f "$APP/Contents/MacOS/$APP_NAME" >/dev/null; then
+  echo "ERROR: Quit CamBar before replacing its signed bundle." >&2
+  exit 1
+fi
 EXISTING_TEAM_ID=""
 if [[ -e "$APP" ]]; then
   EXISTING_TEAM_ID=$(codesign -dv --verbose=4 "$APP" 2>&1 | awk -F= '/^TeamIdentifier=/ { print $2; exit }')
@@ -100,7 +104,9 @@ if [[ -n "$EXISTING_TEAM_ID" && "$STAGED_TEAM_ID" != "$EXISTING_TEAM_ID" ]]; the
 fi
 
 if [[ -e "$APP" ]]; then
-  trash "$APP"
+  ditto "$STAGED_APP" "$APP"
+else
+  mv "$STAGED_APP" "$APP"
 fi
-mv "$STAGED_APP" "$APP"
+codesign --verify --deep --strict "$APP"
 echo "Created $APP"
