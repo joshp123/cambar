@@ -83,4 +83,26 @@ final class CamBarTests: XCTestCase {
 
         XCTAssertEqual(rtspURL, "rtsp://admin:secret@192.168.1.249:554/Streaming/Channels/101")
     }
+
+    func testRelayHealthRequiresCurrentVideoFlow() throws {
+        let first = try XCTUnwrap(RelayStreamSample.decode(Data(#"{"producers":[{"medias":["video, recvonly, H264"],"bytes_recv":400000}]}"#.utf8)))
+        let advancing = try XCTUnwrap(RelayStreamSample.decode(Data(#"{"producers":[{"medias":["video, recvonly, H264"],"bytes_recv":425000}]}"#.utf8)))
+        let stalled = try XCTUnwrap(RelayStreamSample.decode(Data(#"{"producers":[{"medias":["video, recvonly, H264"],"bytes_recv":400000}]}"#.utf8)))
+        let audioOnly = try XCTUnwrap(RelayStreamSample.decode(Data(#"{"producers":[{"medias":["audio, recvonly, PCMA"],"bytes_recv":425000}]}"#.utf8)))
+
+        XCTAssertTrue(advancing.isAdvancing(from: first))
+        XCTAssertFalse(stalled.isAdvancing(from: first))
+        XCTAssertFalse(audioOnly.isAdvancing(from: first))
+    }
+
+    func testRelayRetryPolicyBacksOffAndCaps() {
+        let policy = RelayRetryPolicy()
+
+        XCTAssertEqual(policy.delay(afterFailure: 1), 1)
+        XCTAssertEqual(policy.delay(afterFailure: 2), 2)
+        XCTAssertEqual(policy.delay(afterFailure: 3), 5)
+        XCTAssertEqual(policy.delay(afterFailure: 4), 10)
+        XCTAssertEqual(policy.delay(afterFailure: 5), 30)
+        XCTAssertEqual(policy.delay(afterFailure: 20), 30)
+    }
 }

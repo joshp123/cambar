@@ -13,6 +13,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     private var menuProbeToken = 0
     private var debugPopoverRemaining = 0
     private var debugPopoverVisibleSeconds: TimeInterval = 2
+    private var didRunDebugHooks = false
     private let nativeVideoSize = CGSize(width: 2688, height: 1520)
     private lazy var uiState = CamBarUIState(videoSize: bestPopoverVideoSize(anchorButton: statusItem.button))
 
@@ -20,7 +21,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         DirectStreamTelemetry.reset()
         DirectStreamTelemetry.record(component: "app", event: "launch")
         loginItemController.ensureRegistered()
-        let relayStarted = relayController.startIfAvailable()
         wakeObserver = NSWorkspace.shared.notificationCenter.addObserver(
             forName: NSWorkspace.didWakeNotification,
             object: nil,
@@ -29,13 +29,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
             Task { @MainActor [weak self] in
                 guard let self else { return }
                 self.refreshRelayAfterWake()
-            }
-        }
-        if relayStarted {
-            relayController.waitForMainReady { [weak self] ready in
-                DispatchQueue.main.async {
-                    self?.finishRelayWarm(ready: ready)
-                }
             }
         }
         if let button = statusItem.button {
@@ -59,10 +52,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
                 }
             )
         )
-        if !relayStarted {
-            finishRelayWarm(ready: false, reason: "launch_start_failed")
+        relayController.onStateChange = { [weak self] state in
+            self?.relayStateDidChange(state)
         }
-
+        relayController.start()
     }
 
     func applicationWillTerminate(_ notification: Notification) {
@@ -75,32 +68,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
 
     private func refreshRelayAfterWake() {
         Go2RTCVideoView.stop(surface: "menu", reason: "relay_refresh")
+        Go2RTCVideoView.stop(surface: "window", reason: "relay_refresh")
         uiState.relayAvailable = false
         uiState.videoSize = bestPopoverVideoSize(anchorButton: statusItem.button)
-        let relayStarted = relayController.startIfAvailable()
-        guard relayStarted else {
-            finishRelayWarm(ready: false, reason: "wake", runDebugHooks: false)
-            return
-        }
-        relayController.waitForMainReady { [weak self] ready in
-            DispatchQueue.main.async {
-                self?.finishRelayWarm(ready: ready, reason: "wake", runDebugHooks: false)
-            }
-        }
+        relayController.restart()
     }
 
-    private func finishRelayWarm(ready: Bool, reason: String = "launch", runDebugHooks: Bool = true) {
+    private func relayStateDidChange(_ state: Go2RTCRelayController.State) {
+        let ready = state == .ready
+        if uiState.relayAvailable, !ready {
+            Go2RTCVideoView.stop(surface: "menu", reason: "relay_unavailable")
+            Go2RTCVideoView.stop(surface: "window", reason: "relay_unavailable")
+        }
         uiState.relayAvailable = ready
         uiState.videoSize = bestPopoverVideoSize(anchorButton: statusItem.button)
-        DirectStreamTelemetry.record(
-            component: "app",
-            event: ready ? "relay_warm_wait_finished" : "relay_warm_wait_failed",
-            detail: "reason=\(reason)"
-        )
-        if ready {
-            warmMenuVideo()
-        }
-        guard runDebugHooks else { return }
+        guard ready else { return }
+        warmMenuVideo()
+        runDebugHooksOnce()
+    }
+
+    private func runDebugHooksOnce() {
+        guard !didRunDebugHooks else { return }
+        didRunDebugHooks = true
         if ProcessInfo.processInfo.environment["CAMBAR_OPEN_WINDOW"] == "1" {
             DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak self] in
                 self?.openWindow()

@@ -1,66 +1,169 @@
 import CamBarCore
 import Foundation
 
-final class Go2RTCRelayController: @unchecked Sendable {
+@MainActor
+final class Go2RTCRelayController {
     static let mainStreamName = "cambar_main"
 
-    private let queue = DispatchQueue(label: "CamBar.go2rtc")
+    enum Failure: Error, Equatable, CustomStringConvertible {
+        case helperMissing
+        case sourceMissing
+        case configWriteFailed
+        case processLaunchFailed(String)
+        case processExited(Int32)
+        case cameraUnavailable
+
+        var description: String {
+            switch self {
+            case .helperMissing: "go2rtc helper missing"
+            case .sourceMissing: "camera source missing"
+            case .configWriteFailed: "relay config write failed"
+            case let .processLaunchFailed(message): "go2rtc launch failed: \(message)"
+            case let .processExited(status): "go2rtc exited with status \(status)"
+            case .cameraUnavailable: "camera unavailable"
+            }
+        }
+    }
+
+    enum State: Equatable {
+        case stopped
+        case starting(attempt: Int)
+        case warming(attempt: Int)
+        case ready
+        case waitingToRetry(failure: Failure, delay: TimeInterval)
+    }
+
+    var onStateChange: ((State) -> Void)?
+
+    private(set) var state: State = .stopped {
+        didSet {
+            guard state != oldValue else { return }
+            DirectStreamTelemetry.record(component: "relay", event: state.telemetryEvent, detail: state.telemetryDetail)
+            onStateChange?(state)
+        }
+    }
+
+    private let retryPolicy: RelayRetryPolicy
     private var process: Process?
     private var logPipe: Pipe?
     private var logHandle: FileHandle?
+    private var recoveryTask: Task<Void, Never>?
+    private var generation = 0
+
+    init(retryPolicy: RelayRetryPolicy = RelayRetryPolicy()) {
+        self.retryPolicy = retryPolicy
+    }
+
+    func start() {
+        guard recoveryTask == nil else { return }
+        generation += 1
+        let currentGeneration = generation
+        recoveryTask = Task { [weak self] in
+            await self?.runRecoveryLoop(generation: currentGeneration)
+        }
+    }
+
+    func restart() {
+        cancelRecovery()
+        terminateProcess()
+        start()
+    }
+
+    func stop() {
+        cancelRecovery()
+        terminateProcess()
+        state = .stopped
+    }
 
     private var cacheDirectory: URL {
         StreamSourceResolver.makeCacheFolderURL(namespace: "go2rtc")
     }
 
-    func startIfAvailable() -> Bool {
-        queue.sync {
-            if process != nil { return true }
-            return startLocked(event: "start_requested")
-        }
-    }
+    private func runRecoveryLoop(generation expectedGeneration: Int) async {
+        var attempt = 0
+        var failureCount = 0
 
-    func stop() {
-        queue.sync {
-            stopLocked()
-        }
-    }
-
-    func waitForMainReady(timeout: TimeInterval = 15, completion: @escaping @Sendable (Bool) -> Void) {
-        queue.async { [weak self] in
-            guard let self else {
-                completion(false)
-                return
+        while !Task.isCancelled, expectedGeneration == generation {
+            attempt += 1
+            state = .starting(attempt: attempt)
+            terminateProcess()
+            if attempt > 1 {
+                try? await Task.sleep(for: .milliseconds(150))
             }
-            let deadline = Date().addingTimeInterval(timeout)
-            var mainReady = false
-            while Date() < deadline {
-                if !mainReady, self.streamHasVideo(Self.mainStreamName) {
-                    mainReady = true
-                    DirectStreamTelemetry.record(component: "relay", event: "stream_warm", stream: Self.mainStreamName)
-                }
-                if mainReady {
-                    completion(true)
+
+            switch startProcess() {
+            case .success:
+                state = .warming(attempt: attempt)
+                if await waitForCurrentVideo(timeout: 8) {
+                    guard !Task.isCancelled, expectedGeneration == generation else { return }
+                    state = .ready
+                    recoveryTask = nil
                     return
                 }
-                Thread.sleep(forTimeInterval: 0.2)
+            case let .failure(failure):
+                await scheduleRetry(after: failure, failureCount: &failureCount)
+                continue
             }
-            DirectStreamTelemetry.record(
-                component: "relay",
-                event: "stream_warm_timeout",
-                detail: "main=\(mainReady)"
-            )
-            completion(false)
+
+            let failure: Failure
+            if let process, !process.isRunning {
+                failure = .processExited(process.terminationStatus)
+            } else {
+                failure = .cameraUnavailable
+            }
+            terminateProcess()
+            await scheduleRetry(after: failure, failureCount: &failureCount)
         }
+    }
+
+    private func scheduleRetry(after failure: Failure, failureCount: inout Int) async {
+        failureCount += 1
+        let delay = retryPolicy.delay(afterFailure: failureCount)
+        state = .waitingToRetry(failure: failure, delay: delay)
+        try? await Task.sleep(for: .seconds(delay))
+    }
+
+    private func startProcess() -> Result<Void, Failure> {
+        guard let go2rtcPath = StreamSourceResolver.resolveExecutablePath("go2rtc", overridePath: nil) else {
+            return .failure(.helperMissing)
+        }
+        guard let configURL = writeConfig() else {
+            return .failure(sourceURL() == nil ? .sourceMissing : .configWriteFailed)
+        }
+
+        killLegacyRelay(configURL: configURL)
+
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: go2rtcPath)
+        process.arguments = ["-config", configURL.path]
+        process.environment = ["PATH": StreamSourceResolver.searchPaths().joined(separator: ":")]
+        attachRedactedLogOutput(to: process)
+        process.terminationHandler = { [weak self, weak process] _ in
+            guard let process else { return }
+            Task { @MainActor [weak self] in
+                self?.processDidTerminate(process)
+            }
+        }
+
+        do {
+            try process.run()
+            self.process = process
+            return .success(())
+        } catch {
+            closeLogOutput()
+            return .failure(.processLaunchFailed(error.localizedDescription))
+        }
+    }
+
+    private func sourceURL() -> String? {
+        StreamSourceResolver.loadRtspOverride()
+            ?? StreamSourceResolver.loadCameraConfig(from: StreamSourceResolver.defaultConfigURL())
+                .flatMap(StreamSourceResolver.buildRtspURL)
     }
 
     private func writeConfig() -> URL? {
+        guard let primaryRTSPURL = sourceURL() else { return nil }
         let configURL = cacheDirectory.appendingPathComponent("go2rtc.yaml")
-        let primaryRTSPURL = StreamSourceResolver.loadRtspOverride()
-            ?? StreamSourceResolver.loadCameraConfig(from: StreamSourceResolver.defaultConfigURL())
-                .flatMap { StreamSourceResolver.buildRtspURL(from: $0) }
-        guard let primaryRTSPURL else { return nil }
-
         let config = """
         api:
           listen: 127.0.0.1:1984
@@ -83,51 +186,60 @@ final class Go2RTCRelayController: @unchecked Sendable {
         }
     }
 
-    private func startLocked(event: String) -> Bool {
-        DirectStreamTelemetry.record(component: "relay", event: event)
-        guard let go2rtcPath = StreamSourceResolver.resolveExecutablePath("go2rtc", overridePath: nil) else {
-            DirectStreamTelemetry.record(component: "relay", event: "go2rtc_not_found")
-            return false
+    private func waitForCurrentVideo(timeout: TimeInterval) async -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        var previousSample: RelayStreamSample?
+
+        while !Task.isCancelled, Date() < deadline {
+            guard process?.isRunning == true else { return false }
+            if let sample = await streamSample() {
+                if let previousSample, sample.isAdvancing(from: previousSample) {
+                    return true
+                }
+                previousSample = sample
+            }
+            try? await Task.sleep(for: .milliseconds(200))
         }
-        guard let configURL = writeConfig() else {
-            DirectStreamTelemetry.record(component: "relay", event: "config_write_failed")
-            return false
-        }
-        killLegacyRelay(configURL: configURL)
-        return startProcess(go2rtcPath: go2rtcPath, configURL: configURL)
+        return false
     }
 
-    private func startProcess(go2rtcPath: String, configURL: URL) -> Bool {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: go2rtcPath)
-        process.arguments = ["-config", configURL.path]
-        process.environment = [
-            "PATH": StreamSourceResolver.searchPaths().joined(separator: ":")
-        ]
-        attachRedactedLogOutput(to: process)
-        process.terminationHandler = { [weak self] _ in
-            guard let relay = self else { return }
-            relay.queue.async {
-                DirectStreamTelemetry.record(
-                    component: "relay",
-                    event: "process_terminated",
-                    detail: "status=\(process.terminationStatus)"
-                )
-                guard relay.process === process else { return }
-                relay.closeLogOutput()
-                relay.process = nil
-            }
+    private func streamSample() async -> RelayStreamSample? {
+        guard let encoded = Self.mainStreamName.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed),
+              let url = URL(string: "http://127.0.0.1:1984/api/streams?src=\(encoded)") else {
+            return nil
         }
-        do {
-            try process.run()
-            self.process = process
-            DirectStreamTelemetry.record(component: "relay", event: "process_started")
-            return true
-        } catch {
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 0.5
+        guard let (data, response) = try? await URLSession.shared.data(for: request),
+              (response as? HTTPURLResponse)?.statusCode == 200 else {
+            return nil
+        }
+        return RelayStreamSample.decode(data)
+    }
+
+    private func processDidTerminate(_ terminatedProcess: Process) {
+        guard process === terminatedProcess else { return }
+        process = nil
+        closeLogOutput()
+    }
+
+    private func terminateProcess() {
+        guard let process else {
             closeLogOutput()
-            DirectStreamTelemetry.record(component: "relay", event: "process_start_failed", detail: error.localizedDescription)
-            return false
+            return
         }
+        process.terminationHandler = nil
+        if process.isRunning {
+            process.terminate()
+        }
+        self.process = nil
+        closeLogOutput()
+    }
+
+    private func cancelRecovery() {
+        generation += 1
+        recoveryTask?.cancel()
+        recoveryTask = nil
     }
 
     private func killLegacyRelay(configURL: URL) {
@@ -138,50 +250,28 @@ final class Go2RTCRelayController: @unchecked Sendable {
         kill.waitUntilExit()
     }
 
-    private func stopLocked() {
-        if let process {
-            process.terminate()
-            process.waitUntilExit()
-        }
-        process = nil
-        closeLogOutput()
-    }
-
-    private func streamHasVideo(_ streamName: String) -> Bool {
-        guard let encoded = streamName.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed),
-              let url = URL(string: "http://127.0.0.1:1984/api/streams?src=\(encoded)") else {
-            return false
-        }
-        var request = URLRequest(url: url)
-        request.timeoutInterval = 0.5
-        guard let data = try? URLSession.shared.synchronousData(for: request),
-              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let producers = json["producers"] as? [[String: Any]] else {
-            return false
-        }
-        return producers.contains { producer in
-            guard let bytes = producer["bytes_recv"] as? Int else { return false }
-            return bytes > 300_000
-        }
-    }
-
     private func attachRedactedLogOutput(to process: Process) {
         closeLogOutput()
         let logURL = cacheDirectory.appendingPathComponent("go2rtc.log")
         try? Data().write(to: logURL, options: .atomic)
-        guard let handle = try? FileHandle(forWritingTo: logURL) else {
-            return
-        }
+        guard let handle = try? FileHandle(forWritingTo: logURL) else { return }
+
         let pipe = Pipe()
         pipe.fileHandleForReading.readabilityHandler = { [weak self] fileHandle in
             let data = fileHandle.availableData
             guard !data.isEmpty else { return }
-            self?.logHandle?.write(StreamSourceResolver.redactRtspCredentials(in: data))
+            Task { @MainActor [weak self] in
+                self?.writeLog(data)
+            }
         }
         process.standardOutput = pipe
         process.standardError = pipe
         logHandle = handle
         logPipe = pipe
+    }
+
+    private func writeLog(_ data: Data) {
+        logHandle?.write(StreamSourceResolver.redactRtspCredentials(in: data))
     }
 
     private func closeLogOutput() {
@@ -195,37 +285,25 @@ final class Go2RTCRelayController: @unchecked Sendable {
     }
 }
 
-private extension URLSession {
-    func synchronousData(for request: URLRequest) throws -> Data {
-        let semaphore = DispatchSemaphore(value: 0)
-        let box = URLSessionResultBox()
-        let task = dataTask(with: request) { data, _, error in
-            if let error {
-                box.set(.failure(error))
-            } else {
-                box.set(.success(data ?? Data()))
-            }
-            semaphore.signal()
+private extension Go2RTCRelayController.State {
+    var telemetryEvent: String {
+        switch self {
+        case .stopped: "stopped"
+        case .starting: "starting"
+        case .warming: "warming"
+        case .ready: "ready"
+        case .waitingToRetry: "waiting_to_retry"
         }
-        task.resume()
-        semaphore.wait()
-        return try box.value()?.get() ?? Data()
-    }
-}
-
-private final class URLSessionResultBox: @unchecked Sendable {
-    private let lock = NSLock()
-    private var stored: Result<Data, Error>?
-
-    func set(_ value: Result<Data, Error>) {
-        lock.lock()
-        stored = value
-        lock.unlock()
     }
 
-    func value() -> Result<Data, Error>? {
-        lock.lock()
-        defer { lock.unlock() }
-        return stored
+    var telemetryDetail: String? {
+        switch self {
+        case .stopped, .ready:
+            nil
+        case let .starting(attempt), let .warming(attempt):
+            "attempt=\(attempt)"
+        case let .waitingToRetry(failure, delay):
+            "failure=\(failure.description) delay_seconds=\(Int(delay))"
+        }
     }
 }
