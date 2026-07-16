@@ -271,11 +271,18 @@ private final class StatusItemDriver {
 
     func waitForFrame(identifier: String, timeout: TimeInterval) throws -> CGRect {
         let deadline = Date().addingTimeInterval(timeout)
+        var previousFrame: CGRect?
         repeat {
             if let element = findElement(identifier: identifier),
                let frame = frame(of: element),
-               !frame.isEmpty {
-                return frame
+               !frame.isEmpty,
+               isOnActiveDisplay(frame) {
+                if previousFrame == frame {
+                    return frame
+                }
+                previousFrame = frame
+            } else {
+                previousFrame = nil
             }
             RunLoop.current.run(until: Date().addingTimeInterval(0.1))
         } while Date() < deadline
@@ -284,6 +291,14 @@ private final class StatusItemDriver {
 
     func click(frame: CGRect) throws {
         try clickPhysically(frame: frame)
+    }
+
+    func clickStatusItem() throws {
+        try clickPhysically(frame: waitForFrame(timeout: 2))
+    }
+
+    func burstClickStatusItem(count: Int = 2) throws {
+        try clickBurst(frame: waitForFrame(timeout: 2), count: count)
     }
 
     func clickBurst(frame: CGRect, count: Int = 2) throws {
@@ -452,6 +467,17 @@ private final class StatusItemDriver {
             return nil
         }
         return CGRect(origin: position, size: size)
+    }
+
+    private func isOnActiveDisplay(_ frame: CGRect) -> Bool {
+        var displays = [CGDirectDisplayID](repeating: 0, count: 16)
+        var count: UInt32 = 0
+        guard CGGetActiveDisplayList(UInt32(displays.count), &displays, &count) == .success else {
+            return false
+        }
+        return displays.prefix(Int(count)).contains {
+            CGDisplayBounds($0).contains(CGPoint(x: frame.midX, y: frame.midY))
+        }
     }
 }
 
@@ -886,8 +912,8 @@ private func run() throws {
     try assertCamBarIsNotFrontmost("after background launch")
 
     let driver = StatusItemDriver(processIdentifier: application.processIdentifier)
-    let statusFrame = try driver.waitForFrame(timeout: 10)
-    try driver.click(frame: statusFrame)
+    _ = try driver.waitForFrame(timeout: 10)
+    try driver.clickStatusItem()
     _ = try telemetry.waitForEvent(
         "status_click",
         timeout: 2,
@@ -945,7 +971,7 @@ private func run() throws {
         processIdentifier: application.processIdentifier,
         path: screenshotPath(for: 1, basePath: options.screenshotPath) + ".cold.png"
     )
-    try driver.click(frame: statusFrame)
+    try driver.clickStatusItem()
     _ = try telemetry.waitForEvent(
         "menu_closed",
         timeout: 3,
@@ -1012,7 +1038,7 @@ private func run() throws {
     try assertCamBarIsNotFrontmost("after first-open idle")
 
     let popoutStatusClickCount = try telemetry.count("status_click", surface: "menu")
-    try driver.click(frame: statusFrame)
+    try driver.clickStatusItem()
     try telemetry.waitForCount(
         "status_click",
         count: popoutStatusClickCount + 1,
@@ -1070,7 +1096,7 @@ private func run() throws {
     for cycle in 1...totalOpenCycles {
         let phase = cycle == 1 ? "idle first open" : "reopen \(cycle - 1)/\(options.reopenCycles)"
         let statusClicksBeforeOpen = try telemetry.count("status_click", surface: "menu")
-        try driver.click(frame: statusFrame)
+        try driver.clickStatusItem()
         try telemetry.waitForCount(
             "status_click",
             count: statusClicksBeforeOpen + 1,
@@ -1098,7 +1124,7 @@ private func run() throws {
         )
 
         let statusClicksBeforeClose = try telemetry.count("status_click", surface: "menu")
-        try driver.click(frame: statusFrame)
+        try driver.clickStatusItem()
         try telemetry.waitForCount(
             "status_click",
             count: statusClicksBeforeClose + 1,
@@ -1129,7 +1155,7 @@ private func run() throws {
     }
 
     let openingBurstClickCount = try telemetry.count("status_click", component: "app", surface: "menu")
-    try driver.clickBurst(frame: statusFrame)
+    try driver.burstClickStatusItem()
     try telemetry.waitForCount(
         "status_click",
         count: openingBurstClickCount + 2,
@@ -1172,7 +1198,7 @@ private func run() throws {
     try assertCamBarIsNotFrontmost("after open-close-during-opening burst")
 
     let raceOpenClickCount = try telemetry.count("status_click", component: "app", surface: "menu")
-    try driver.click(frame: statusFrame)
+    try driver.clickStatusItem()
     try telemetry.waitForCount(
         "status_click",
         count: raceOpenClickCount + 1,
@@ -1194,7 +1220,7 @@ private func run() throws {
     warmOpenLatencies.append(raceWarmOpen.elapsedMilliseconds)
 
     let closingBurstClickCount = try telemetry.count("status_click", component: "app", surface: "menu")
-    try driver.clickBurst(frame: statusFrame)
+    try driver.burstClickStatusItem()
     try telemetry.waitForCount(
         "status_click",
         count: closingBurstClickCount + 2,
@@ -1241,7 +1267,7 @@ private func run() throws {
         path: screenshotPath(for: totalOpenCycles + 1, basePath: options.screenshotPath)
     )
     let finalCloseClickCount = try telemetry.count("status_click", component: "app", surface: "menu")
-    try driver.click(frame: statusFrame)
+    try driver.clickStatusItem()
     try telemetry.waitForCount(
         "status_click",
         count: finalCloseClickCount + 1,
