@@ -185,11 +185,7 @@ BUNDLE_BIN_DIR="$APP/Contents/Resources/bin"
 mkdir -p "$BUNDLE_BIN_DIR"
 cp "$GO2RTC_SOURCE" "$BUNDLE_BIN_DIR/go2rtc"
 chmod +x "$BUNDLE_BIN_DIR/go2rtc"
-
-if command -v camsnap >/dev/null 2>&1; then
-  cp "$(command -v camsnap)" "$BUNDLE_BIN_DIR/camsnap"
-  chmod +x "$BUNDLE_BIN_DIR/camsnap"
-fi
+verify_binary_arches "$BUNDLE_BIN_DIR/go2rtc" "${ARCH_LIST[@]}"
 
 # Ensure contents are writable before stripping attributes and signing.
 chmod -R u+w "$APP"
