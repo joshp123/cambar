@@ -171,8 +171,12 @@ final class CameraPlaybackController: NSObject, WKNavigationDelegate, WKScriptMe
             if diagnosticsEnabled {
                 recordSnapshot(surface: surface, openElapsed: openElapsed)
             }
-        case "video_error", "frame_stalled":
+        case "video_error":
             recover(reason: event)
+        case "frame_stalled":
+            if activeSurface != nil {
+                recover(reason: event)
+            }
         default:
             break
         }

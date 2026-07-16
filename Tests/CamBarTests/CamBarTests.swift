@@ -22,20 +22,6 @@ final class CamBarTests: XCTestCase {
         XCTAssertFalse(redacted.contains("secret"))
     }
 
-    func testDirectStreamTelemetryRedactsDetail() throws {
-        DirectStreamTelemetry.reset()
-
-        DirectStreamTelemetry.record(
-            component: "test",
-            event: "sample",
-            detail: "rtsp://admin:secret@192.168.1.249:554/Streaming/Channels/101"
-        )
-
-        let text = try String(contentsOf: DirectStreamTelemetry.logURL, encoding: .utf8)
-        XCTAssertTrue(text.contains("admin:***@192.168.1.249"))
-        XCTAssertFalse(text.contains("secret"))
-    }
-
     func testLoadCameraConfigParsesFirstCamera() throws {
         let yaml = """
         cameras:

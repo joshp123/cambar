@@ -49,6 +49,7 @@ final class Go2RTCRelayController {
     private var logHandle: FileHandle?
     private var recoveryTask: Task<Void, Never>?
     private var generation = 0
+    private let diagnosticsEnabled = ProcessInfo.processInfo.environment["CAMBAR_DIAGNOSTICS"] == "1"
 
     init(retryPolicy: RelayRetryPolicy = RelayRetryPolicy()) {
         self.retryPolicy = retryPolicy
@@ -277,6 +278,11 @@ final class Go2RTCRelayController {
 
     private func attachRedactedLogOutput(to process: Process) {
         closeLogOutput()
+        guard diagnosticsEnabled else {
+            process.standardOutput = FileHandle.nullDevice
+            process.standardError = FileHandle.nullDevice
+            return
+        }
         let logURL = cacheDirectory.appendingPathComponent("go2rtc.log")
         try? Data().write(to: logURL, options: .atomic)
         guard let handle = try? FileHandle(forWritingTo: logURL) else { return }

@@ -70,6 +70,7 @@ open -n \
   --env "CAMBAR_DEBUG_POPOVER_CYCLES=$POPOVER_CYCLES" \
   --env "CAMBAR_DEBUG_POPOVER_START_DELAY_SECONDS=$POPOVER_START_DELAY_SECONDS" \
   --env "CAMBAR_DEBUG_POPOVER_VISIBLE_SECONDS=$POPOVER_VISIBLE_SECONDS" \
+  --env "CAMBAR_DIAGNOSTICS=1" \
   "$APP_BUNDLE"
 
 for _ in {1..40}; do
@@ -158,17 +159,25 @@ import Foundation
 
 let text = (try? String(contentsOfFile: CommandLine.arguments[1], encoding: .utf8)) ?? ""
 let expected = Int(CommandLine.arguments[2]) ?? 1
-let timings = text.split(separator: "\n").compactMap { line -> String? in
+let timings = text.split(separator: "\n").compactMap { line -> Int? in
     guard let data = String(line).data(using: .utf8),
           let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-          (json["event"] as? String) == "fresh_enough",
-          let elapsed = json["elapsed_ms"] else {
+          (json["event"] as? String) == "live_view",
+          let elapsed = json["elapsed_ms"] as? Int else {
         return nil
     }
-    return "fresh_enough elapsed_ms=\(elapsed)"
+    return elapsed
 }
-for timing in timings.suffix(expected) {
-    print(timing)
+let selected = Array(timings.suffix(expected))
+guard selected.count == expected else {
+    fputs("missing live_view timings: expected \(expected), got \(timings.count)\n", stderr)
+    exit(1)
+}
+for elapsed in selected {
+    print("live_view elapsed_ms=\(elapsed)")
+}
+if selected.contains(where: { $0 >= 500 }) {
+    exit(2)
 }
 ' "$TELEMETRY" "$POPOVER_CYCLES" | tee "$OUT_DIR/fresh-timing.txt"
 
