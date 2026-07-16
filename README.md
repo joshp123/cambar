@@ -57,7 +57,7 @@ Debug overrides:
 
 ```bash
 export CAMBAR_RTSP_URL="rtsp://user:pass@camera-host:554/Streaming/Channels/101"
-CAMBAR_OPEN_POPOVER=1 ./CamBar.app/Contents/MacOS/CamBar
+CAMBAR_OPEN_POPOVER=1 ~/Applications/CamBar.app/Contents/MacOS/CamBar
 ./Scripts/debug_popover.sh
 ```
 
@@ -65,7 +65,7 @@ If neither source is available, startup shows an error with the missing path.
 
 ## Packaging
 
-`Scripts/package_app.sh` requires `go2rtc` on `PATH` and bundles it into `CamBar.app/Contents/Resources/bin/go2rtc`. Use:
+`Scripts/package_app.sh` requires `go2rtc` on `PATH` and installs the signed app at `~/Applications/CamBar.app`, including its bundled `go2rtc` helper. Use:
 
 ```bash
 nix shell nixpkgs#go2rtc -c ./Scripts/compile_and_run.sh --test

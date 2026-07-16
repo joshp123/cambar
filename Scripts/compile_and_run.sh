@@ -4,9 +4,9 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 APP_NAME=CamBar
-APP_BUNDLE="${ROOT_DIR}/${APP_NAME}.app"
-APP_PROCESS_PATTERN="${APP_NAME}.app/Contents/MacOS/${APP_NAME}"
-GO2RTC_APP_PATTERN="${APP_NAME}.app/Contents/Resources/bin/go2rtc"
+APP_BUNDLE="${HOME}/Applications/${APP_NAME}.app"
+APP_PROCESS_PATTERN="${APP_BUNDLE}/Contents/MacOS/${APP_NAME}"
+GO2RTC_APP_PATTERN="${APP_BUNDLE}/Contents/Resources/bin/go2rtc"
 RUN_TESTS=0
 
 log() { printf '%s\n' "$*"; }

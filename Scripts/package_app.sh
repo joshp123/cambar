@@ -40,7 +40,8 @@ fi
 
 STAGING_ROOT="$ROOT/.build/package"
 STAGED_APP="$STAGING_ROOT/$APP_NAME.app-staging"
-APP="$ROOT/$APP_NAME.app"
+APP="$HOME/Applications/$APP_NAME.app"
+mkdir -p "$HOME/Applications"
 if pgrep -f "$APP/Contents/MacOS/$APP_NAME" >/dev/null; then
   echo "ERROR: Quit CamBar before replacing its signed bundle." >&2
   exit 1
@@ -72,7 +73,7 @@ cat > "$STAGED_APP/Contents/Info.plist" <<PLIST
     <key>CFBundlePackageType</key><string>APPL</string>
     <key>CFBundleShortVersionString</key><string>${MARKETING_VERSION}</string>
     <key>CFBundleVersion</key><string>${BUILD_NUMBER}</string>
-    <key>LSMinimumSystemVersion</key><string>14.0</string>
+    <key>LSMinimumSystemVersion</key><string>27.0</string>
     <key>LSUIElement</key><true/>
     <key>BuildTimestamp</key><string>${BUILD_TIMESTAMP}</string>
     <key>GitCommit</key><string>${GIT_COMMIT}</string>

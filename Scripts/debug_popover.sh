@@ -4,8 +4,8 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 APP_NAME=${APP_NAME:-CamBar}
-APP_BUNDLE="${ROOT_DIR}/${APP_NAME}.app"
-APP_PROCESS_PATTERN="${APP_NAME}.app/Contents/MacOS/${APP_NAME}"
+APP_BUNDLE="${HOME}/Applications/${APP_NAME}.app"
+APP_PROCESS_PATTERN="${APP_BUNDLE}/Contents/MacOS/${APP_NAME}"
 OUT_DIR="${OUT_DIR:-${TMPDIR:-/tmp}/cambar-popover-debug-$(date +%Y%m%d-%H%M%S)}"
 TELEMETRY="${HOME}/Library/Caches/CamBar/direct/direct-stream-events.jsonl"
 GO2RTC_LOG="${HOME}/Library/Caches/CamBar/go2rtc/go2rtc.log"
@@ -32,7 +32,7 @@ cleanup() {
     kill "$APP_PID" 2>/dev/null || true
     wait "$APP_PID" 2>/dev/null || true
   fi
-  pkill -f "${APP_NAME}.app/Contents/Resources/bin/go2rtc" 2>/dev/null || true
+  pkill -f "${APP_BUNDLE}/Contents/Resources/bin/go2rtc" 2>/dev/null || true
 }
 trap cleanup EXIT
 
@@ -51,8 +51,8 @@ mkdir -p "$OUT_DIR"
 cd "$ROOT_DIR"
 
 log "==> Killing existing ${APP_NAME}"
-pkill -f "${APP_NAME}.app/Contents/MacOS/${APP_NAME}" 2>/dev/null || true
-pkill -f "${APP_NAME}.app/Contents/Resources/bin/go2rtc" 2>/dev/null || true
+pkill -f "${APP_BUNDLE}/Contents/MacOS/${APP_NAME}" 2>/dev/null || true
+pkill -f "${APP_BUNDLE}/Contents/Resources/bin/go2rtc" 2>/dev/null || true
 pkill -x "$APP_NAME" 2>/dev/null || true
 sleep 0.5
 
