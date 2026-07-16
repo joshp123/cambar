@@ -21,8 +21,8 @@ final class LoginItemController {
             DirectStreamTelemetry.record(component: "login_item", event: "requires_approval")
             NSLog("CamBar login item requires approval in System Settings > General > Login Items.")
         case .notFound:
-            DirectStreamTelemetry.record(component: "login_item", event: "unavailable")
-            NSLog("CamBar login item registration is unavailable for this bundle.")
+            DirectStreamTelemetry.record(component: "login_item", event: "repairing_registration")
+            register(service)
         @unknown default:
             DirectStreamTelemetry.record(component: "login_item", event: "unknown_status")
             NSLog("CamBar login item registration has an unknown status.")
