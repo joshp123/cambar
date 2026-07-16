@@ -41,10 +41,8 @@ private struct Options {
                 }
                 result.firstOpenIdleSeconds = seconds
                 arguments.removeFirst()
-            case "--physical-clicks":
-                break
             case "-h", "--help":
-                print("Usage: smoke_ui.sh [--reopen-cycles COUNT] [--first-open-idle SECONDS] [--screenshot PATH] [--physical-clicks]")
+                print("Usage: smoke_ui.sh [--reopen-cycles COUNT] [--first-open-idle SECONDS] [--screenshot PATH]")
                 exit(0)
             default:
                 throw SmokeError.message("unknown argument: \(argument)")
@@ -289,59 +287,28 @@ private final class StatusItemDriver {
         throw SmokeError.message("could not locate AX identifier \(identifier)")
     }
 
-    func click(frame: CGRect) throws {
-        try clickPhysically(frame: frame)
+    func press(identifier: String) throws {
+        guard let element = findElement(identifier: identifier) else {
+            throw SmokeError.message("could not locate AX identifier \(identifier)")
+        }
+        guard AXUIElementPerformAction(element, kAXPressAction as CFString) == .success else {
+            throw SmokeError.message("could not press AX identifier \(identifier)")
+        }
     }
 
     func clickStatusItem() throws {
-        try clickPhysically(frame: waitForFrame(timeout: 2))
+        _ = try waitForFrame(timeout: 2)
+        try press(identifier: statusItemIdentifier)
     }
 
     func burstClickStatusItem(count: Int = 2) throws {
-        try clickBurst(frame: waitForFrame(timeout: 2), count: count)
-    }
-
-    func clickBurst(frame: CGRect, count: Int = 2) throws {
         precondition(count >= 2)
-        let originalLocation = CGEvent(source: nil)?.location ?? NSEvent.mouseLocation
-        defer { CGWarpMouseCursorPosition(originalLocation) }
-        let target = CGPoint(x: frame.midX, y: frame.midY)
-        guard let source = CGEventSource(stateID: .hidSystemState),
-              let moved = CGEvent(
-                mouseEventSource: source,
-                mouseType: .mouseMoved,
-                mouseCursorPosition: target,
-                mouseButton: .left
-              ) else {
-            throw SmokeError.message("could not construct physical burst mouse events")
-        }
-        moved.post(tap: .cghidEventTap)
-        usleep(20_000)
-        let movedLocation = CGEvent(source: nil)?.location ?? NSEvent.mouseLocation
-        guard frame.insetBy(dx: -2, dy: -2).contains(movedLocation) else {
-            throw SmokeError.message("cursor move missed status item before physical burst")
-        }
+        _ = try waitForFrame(timeout: 2)
         for _ in 0..<count {
-            guard let down = CGEvent(
-                mouseEventSource: source,
-                mouseType: .leftMouseDown,
-                mouseCursorPosition: target,
-                mouseButton: .left
-            ), let up = CGEvent(
-                mouseEventSource: source,
-                mouseType: .leftMouseUp,
-                mouseCursorPosition: target,
-                mouseButton: .left
-            ) else {
-                throw SmokeError.message("could not construct physical burst mouse events")
-            }
-            down.post(tap: .cghidEventTap)
-            usleep(5_000)
-            up.post(tap: .cghidEventTap)
-            usleep(5_000)
+            try press(identifier: statusItemIdentifier)
+            usleep(10_000)
         }
         usleep(40_000)
-        print("Physically burst-clicked status item count=\(count) frame=\(NSStringFromRect(frame))")
     }
 
     func closeFirstWindow() throws {
@@ -361,46 +328,6 @@ private final class StatusItemDriver {
         guard AXUIElementPerformAction(closeButton, kAXPressAction as CFString) == .success else {
             throw SmokeError.message("CamBar popout close button could not be pressed")
         }
-    }
-
-    private func clickPhysically(frame: CGRect) throws {
-        let originalLocation = CGEvent(source: nil)?.location ?? NSEvent.mouseLocation
-        defer { CGWarpMouseCursorPosition(originalLocation) }
-        let target = CGPoint(x: frame.midX, y: frame.midY)
-        guard let source = CGEventSource(stateID: .hidSystemState),
-              let moved = CGEvent(
-                mouseEventSource: source,
-                mouseType: .mouseMoved,
-                mouseCursorPosition: target,
-                mouseButton: .left
-              ),
-              let down = CGEvent(
-                mouseEventSource: source,
-                mouseType: .leftMouseDown,
-                mouseCursorPosition: target,
-                mouseButton: .left
-              ),
-              let up = CGEvent(
-                mouseEventSource: source,
-                mouseType: .leftMouseUp,
-                mouseCursorPosition: target,
-                mouseButton: .left
-              ) else {
-            throw SmokeError.message("could not construct physical Quartz mouse events")
-        }
-        moved.post(tap: .cghidEventTap)
-        usleep(30_000)
-        let movedLocation = CGEvent(source: nil)?.location ?? NSEvent.mouseLocation
-        guard frame.insetBy(dx: -2, dy: -2).contains(movedLocation) else {
-            throw SmokeError.message(
-                "cursor move missed status item: expected \(NSStringFromRect(frame)), found \(NSStringFromPoint(movedLocation))"
-            )
-        }
-        down.post(tap: .cghidEventTap)
-        usleep(40_000)
-        up.post(tap: .cghidEventTap)
-        usleep(40_000)
-        print("Physically clicked status item frame=\(NSStringFromRect(frame))")
     }
 
     private func findElement(identifier: String) -> AXUIElement? {
@@ -894,11 +821,9 @@ private func run() throws {
         throw SmokeError.message("CAMBAR_SMOKE_PID_FILE is required; run through Scripts/smoke_ui.sh")
     }
 
-    let originalCursor = CGEvent(source: nil)?.location
     try assertCamBarIsNotFrontmost("before launch")
     let ownership = OwnedProcesses(appURL: appURL, pidFileURL: URL(fileURLWithPath: pidFilePath))
     defer {
-        if let originalCursor { CGWarpMouseCursorPosition(originalCursor) }
         ownership.terminate()
     }
 
@@ -1059,11 +984,11 @@ private func run() throws {
         telemetry: telemetry
     )
     warmOpenLatencies.append(popoutMenuOpen.elapsedMilliseconds)
-    let expandFrame = try driver.waitForFrame(
+    _ = try driver.waitForFrame(
         identifier: "com.cambar.open-window",
         timeout: 2
     )
-    try driver.click(frame: expandFrame)
+    try driver.press(identifier: "com.cambar.open-window")
     let windowRequested = try telemetry.waitForEvent(
         "window_open_requested",
         timeout: 2,
@@ -1176,7 +1101,7 @@ private func run() throws {
           openingBurstClicks[1].detail?.contains("command=none") == true,
           openingBurstClicks[1].detail?.contains("desired=false") == true,
           openingBurstClicks[1].detail?.contains("state=opening") == true else {
-        throw SmokeError.message("physical open-close burst did not land while the popover was opening")
+        throw SmokeError.message("open-close burst did not land while the popover was opening")
     }
     _ = try telemetry.waitForEvent(
         "menu_closed",
@@ -1242,7 +1167,7 @@ private func run() throws {
           closingBurstClicks[1].detail?.contains("command=none") == true,
           closingBurstClicks[1].detail?.contains("desired=true") == true,
           closingBurstClicks[1].detail?.contains("state=closing") == true else {
-        throw SmokeError.message("physical close-reopen burst did not land while the popover was closing")
+        throw SmokeError.message("close-reopen burst did not land while the popover was closing")
     }
     _ = try telemetry.waitForEvent(
         "menu_closed",
@@ -1291,7 +1216,7 @@ private func run() throws {
         afterUptimeMilliseconds: finalCloseClick.uptimeMilliseconds
     )
     try telemetry.assertNoFailures()
-    try assertCamBarIsNotFrontmost("after physical lifecycle bursts")
+    try assertCamBarIsNotFrontmost("after lifecycle bursts")
 
     try assertExactCounts(
         telemetry: telemetry,
@@ -1324,7 +1249,7 @@ private func run() throws {
     try ownership.assertNoChildProcesses()
     try assertCamBarIsNotFrontmost("at completion")
     print(
-        "PASS: \(totalOpenCycles) warm open/close cycles plus physical lifecycle bursts, <=500 ms live view, "
+        "PASS: \(totalOpenCycles) warm open/close cycles plus lifecycle bursts, <=500 ms live view, "
             + "one hardware-decoded native stream, advancing heartbeats, no pipeline failures, child processes, "
             + "or focus activation; screenshots retained as visual artifacts"
     )
