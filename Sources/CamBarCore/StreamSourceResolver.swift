@@ -29,57 +29,16 @@ public enum StreamSourceResolver {
         }
     }
 
-    public static func resolveExecutablePath(_ name: String, overridePath: String?) -> String? {
-        if let overridePath {
-            let expanded = (overridePath as NSString).expandingTildeInPath
-            if FileManager.default.isExecutableFile(atPath: expanded) {
-                return expanded
-            }
-        }
-        let envVar = name.uppercased() + "_PATH"
-        if let envPath = ProcessInfo.processInfo.environment[envVar],
-           FileManager.default.isExecutableFile(atPath: envPath) {
-            return envPath
-        }
-        for dir in searchPaths() {
-            let path = (dir as NSString).appendingPathComponent(name)
-            if FileManager.default.isExecutableFile(atPath: path) {
-                return path
-            }
-        }
-        return nil
+    public static func bundledGo2RTCPath() -> String? {
+        guard let path = Bundle.main.resourceURL?
+            .appendingPathComponent("bin/go2rtc")
+            .path,
+              FileManager.default.isExecutableFile(atPath: path) else { return nil }
+        return path
     }
 
     public static func defaultConfigURL() -> URL {
         URL(fileURLWithPath: (NSHomeDirectory() as NSString).appendingPathComponent(".config/camsnap/config.yaml"))
-    }
-
-    public static func searchPaths() -> [String] {
-        var extraPaths = [
-            "/opt/homebrew/bin",
-            "/usr/local/bin",
-            "/run/current-system/sw/bin",
-            "/nix/var/nix/profiles/default/bin",
-            (NSHomeDirectory() as NSString).appendingPathComponent(".nix-profile/bin"),
-            (NSHomeDirectory() as NSString).appendingPathComponent(".local/bin"),
-            "/usr/bin",
-            "/bin"
-        ]
-        if let resourceURL = Bundle.main.resourceURL {
-            let bundled = resourceURL.appendingPathComponent("bin").path
-            extraPaths.insert(bundled, at: 0)
-        }
-        let inherited = (ProcessInfo.processInfo.environment["PATH"] ?? "")
-            .split(separator: ":", omittingEmptySubsequences: true)
-            .map(String.init)
-        var seen = Set<String>()
-        var result: [String] = []
-        for path in extraPaths + inherited {
-            guard !seen.contains(path) else { continue }
-            seen.insert(path)
-            result.append(path)
-        }
-        return result
     }
 
     public static func loadRtspOverride() -> String? {
@@ -146,9 +105,9 @@ public enum StreamSourceResolver {
                 hasCamera = true
                 let itemStart = line.dropFirst().trimmingCharacters(in: .whitespaces)
                 if itemStart.isEmpty { continue }
-                applyConfigEntry(String(itemStart), to: &current)
+                guard applyConfigEntry(String(itemStart), to: &current) else { return nil }
             } else if hasCamera {
-                applyConfigEntry(line, to: &current)
+                guard applyConfigEntry(line, to: &current) else { return nil }
             }
         }
         return hasCamera ? current : nil
@@ -185,27 +144,28 @@ public enum StreamSourceResolver {
     public static func makeCacheFolderURL(namespace: String) -> URL {
         let caches = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)
             .first ?? URL(fileURLWithPath: NSTemporaryDirectory())
-        let folder = caches.appendingPathComponent("CamBar", isDirectory: true)
+        return caches.appendingPathComponent("CamBar", isDirectory: true)
             .appendingPathComponent(namespace, isDirectory: true)
-        try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
-        return folder
     }
 
-    private static func applyConfigEntry(_ line: String, to camera: inout CameraConfig) {
+    private static func applyConfigEntry(_ line: String, to camera: inout CameraConfig) -> Bool {
         let parts = line.split(separator: ":", maxSplits: 1, omittingEmptySubsequences: false)
-        guard parts.count == 2 else { return }
+        guard parts.count == 2 else { return true }
         let key = parts[0].trimmingCharacters(in: .whitespaces)
         let value = stripQuotes(parts[1].trimmingCharacters(in: .whitespaces))
         switch key {
         case "name": camera.name = value
         case "host": camera.host = value
-        case "port": camera.port = Int(value)
+        case "port":
+            guard let port = Int(value) else { return false }
+            camera.port = port
         case "protocol": camera.protocolName = value
         case "username": camera.username = value
         case "password": camera.password = value
         case "stream": camera.stream = value
         default: break
         }
+        return true
     }
 
     private static func stripQuotes(_ value: String) -> String {

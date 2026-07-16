@@ -29,12 +29,7 @@ public enum DirectStreamTelemetry {
         detail: String? = nil
     ) {
         guard enabled else { return }
-        queue.sync {
-            try? FileManager.default.createDirectory(
-                at: logURL.deletingLastPathComponent(),
-                withIntermediateDirectories: true
-            )
-
+        queue.async {
             var fields: [String: Any] = [
                 "time": ISO8601DateFormatter().string(from: Date()),
                 "component": component,
@@ -68,5 +63,10 @@ public enum DirectStreamTelemetry {
                 try? lineData.write(to: logURL, options: .atomic)
             }
         }
+    }
+
+    public static func flush() {
+        guard enabled else { return }
+        queue.sync {}
     }
 }

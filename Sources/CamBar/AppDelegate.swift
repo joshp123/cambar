@@ -46,6 +46,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         }
         playbackController.shutdown()
         relayController.stop()
+        DirectStreamTelemetry.flush()
     }
 
     private func configureStatusItem() {

@@ -50,6 +50,8 @@ final class Go2RTCRelayController {
     private var logHandle: FileHandle?
     private var recoveryTask: Task<Void, Never>?
     private var generation = 0
+    private var cleanedUpLegacyRelay = false
+    private var preparedDiagnosticLog = false
     private let diagnosticsEnabled = ProcessInfo.processInfo.environment["CAMBAR_DIAGNOSTICS"] == "1"
 
     init(retryPolicy: RelayRetryPolicy = RelayRetryPolicy()) {
@@ -66,8 +68,15 @@ final class Go2RTCRelayController {
     }
 
     func restart() {
-        cancelRecovery()
-        start()
+        generation += 1
+        let currentGeneration = generation
+        let previousRecovery = recoveryTask
+        previousRecovery?.cancel()
+        recoveryTask = Task { [weak self] in
+            await previousRecovery?.value
+            guard !Task.isCancelled else { return }
+            await self?.runRecoveryLoop(generation: currentGeneration)
+        }
     }
 
     func stop() {
@@ -129,19 +138,22 @@ final class Go2RTCRelayController {
     }
 
     private func startProcess() -> Result<Void, Failure> {
-        guard let go2rtcPath = StreamSourceResolver.resolveExecutablePath("go2rtc", overridePath: nil) else {
+        guard let go2rtcPath = StreamSourceResolver.bundledGo2RTCPath() else {
             return .failure(.helperMissing)
         }
-        guard let configURL = writeConfig() else {
-            return .failure(sourceURL() == nil ? .sourceMissing : .configWriteFailed)
+        let configURL: URL
+        switch writeConfig() {
+        case let .success(url):
+            configURL = url
+        case let .failure(failure):
+            return .failure(failure)
         }
 
-        killLegacyRelay(configURL: configURL)
+        cleanUpLegacyRelayIfNeeded(configURL: configURL)
 
         let process = Process()
         process.executableURL = URL(fileURLWithPath: go2rtcPath)
         process.arguments = ["-config", configURL.path]
-        process.environment = ["PATH": StreamSourceResolver.searchPaths().joined(separator: ":")]
         attachRedactedLogOutput(to: process)
         process.terminationHandler = { [weak self, weak process] _ in
             guard let process else { return }
@@ -166,8 +178,8 @@ final class Go2RTCRelayController {
                 .flatMap(StreamSourceResolver.buildRtspURL)
     }
 
-    private func writeConfig() -> URL? {
-        guard let primaryRTSPURL = sourceURL() else { return nil }
+    private func writeConfig() -> Result<URL, Failure> {
+        guard let primaryRTSPURL = sourceURL() else { return .failure(.sourceMissing) }
         let configURL = cacheDirectory.appendingPathComponent("go2rtc.yaml")
         let config = """
         api:
@@ -183,11 +195,12 @@ final class Go2RTCRelayController {
           cambar_main: video
         """
         do {
+            try FileManager.default.createDirectory(at: cacheDirectory, withIntermediateDirectories: true)
             try Data(config.utf8).write(to: configURL, options: .atomic)
             try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: configURL.path)
-            return configURL
+            return .success(configURL)
         } catch {
-            return nil
+            return .failure(.configWriteFailed)
         }
     }
 
@@ -250,41 +263,46 @@ final class Go2RTCRelayController {
     }
 
     private func terminateProcess() async {
-        guard let process else {
-            closeLogOutput()
-            return
-        }
-        process.terminationHandler = nil
-        if process.isRunning {
-            process.terminate()
-        }
-        self.process = nil
-        closeLogOutput()
+        guard let process = beginProcessTermination() else { return }
         for _ in 0..<20 where process.isRunning {
             try? await Task.sleep(for: .milliseconds(50))
         }
         if process.isRunning {
             Darwin.kill(process.processIdentifier, SIGKILL)
+            process.waitUntilExit()
         }
+        finishProcessTermination(process)
     }
 
     private func terminateProcessForShutdown() {
-        guard let process else {
-            closeLogOutput()
-            return
-        }
-        process.terminationHandler = nil
-        if process.isRunning {
-            process.terminate()
-        }
+        guard let process = beginProcessTermination() else { return }
         for _ in 0..<20 where process.isRunning {
             usleep(10_000)
         }
         if process.isRunning {
             Darwin.kill(process.processIdentifier, SIGKILL)
+            process.waitUntilExit()
         }
-        self.process = nil
+        finishProcessTermination(process)
+    }
+
+    private func beginProcessTermination() -> Process? {
+        guard let process else {
+            closeLogOutput()
+            return nil
+        }
+        process.terminationHandler = nil
         closeLogOutput()
+        if process.isRunning {
+            process.terminate()
+        }
+        return process
+    }
+
+    private func finishProcessTermination(_ terminatedProcess: Process) {
+        if process === terminatedProcess {
+            process = nil
+        }
     }
 
     private func cancelRecovery() {
@@ -293,7 +311,9 @@ final class Go2RTCRelayController {
         recoveryTask = nil
     }
 
-    private func killLegacyRelay(configURL: URL) {
+    private func cleanUpLegacyRelayIfNeeded(configURL: URL) {
+        guard !cleanedUpLegacyRelay else { return }
+        cleanedUpLegacyRelay = true
         let kill = Process()
         kill.executableURL = URL(fileURLWithPath: "/usr/bin/pkill")
         kill.arguments = ["-f", "go2rtc.*\(configURL.path)"]
@@ -309,8 +329,13 @@ final class Go2RTCRelayController {
             return
         }
         let logURL = cacheDirectory.appendingPathComponent("go2rtc.log")
-        try? Data().write(to: logURL, options: .atomic)
+        try? FileManager.default.createDirectory(at: cacheDirectory, withIntermediateDirectories: true)
+        if !preparedDiagnosticLog {
+            try? Data().write(to: logURL, options: .atomic)
+            preparedDiagnosticLog = true
+        }
         guard let handle = try? FileHandle(forWritingTo: logURL) else { return }
+        handle.seekToEndOfFile()
 
         let pipe = Pipe()
         pipe.fileHandleForReading.readabilityHandler = { [weak self] fileHandle in

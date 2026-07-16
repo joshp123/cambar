@@ -104,6 +104,22 @@ final class CamBarTests: XCTestCase {
         XCTAssertNil(StreamSourceResolver.buildRtspURL(from: .init(stream: "https://camera.local/live")))
     }
 
+    func testLoadCameraConfigRejectsMalformedPort() throws {
+        let yaml = """
+        cameras:
+          - name: front
+            host: camera.local
+            port: nope
+        """
+        let tempURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+            .appendingPathExtension("yaml")
+        try yaml.write(to: tempURL, atomically: true, encoding: .utf8)
+        defer { try? FileManager.default.removeItem(at: tempURL) }
+
+        XCTAssertNil(StreamSourceResolver.loadCameraConfig(from: tempURL))
+    }
+
     func testRelayHealthRequiresCurrentVideoFlow() throws {
         let first = try XCTUnwrap(RelayStreamSample.decode(Data(#"{"producers":[{"medias":["video, recvonly, H264"],"bytes_recv":400000}]}"#.utf8)))
         let advancing = try XCTUnwrap(RelayStreamSample.decode(Data(#"{"producers":[{"medias":["video, recvonly, H264"],"bytes_recv":425000}]}"#.utf8)))
