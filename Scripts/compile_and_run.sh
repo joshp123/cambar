@@ -3,11 +3,9 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-APP_NAME=${APP_NAME:-CamBar}
+APP_NAME=CamBar
 APP_BUNDLE="${ROOT_DIR}/${APP_NAME}.app"
 APP_PROCESS_PATTERN="${APP_NAME}.app/Contents/MacOS/${APP_NAME}"
-DEBUG_PROCESS_PATTERN="${ROOT_DIR}/.build/debug/${APP_NAME}"
-RELEASE_PROCESS_PATTERN="${ROOT_DIR}/.build/release/${APP_NAME}"
 GO2RTC_APP_PATTERN="${APP_NAME}.app/Contents/Resources/bin/go2rtc"
 RUN_TESTS=0
 
@@ -28,25 +26,18 @@ command -v go2rtc >/dev/null 2>&1 || fail "go2rtc not found on PATH; refusing to
 
 log "==> Killing existing ${APP_NAME} instances"
 pkill -f "${APP_PROCESS_PATTERN}" 2>/dev/null || true
-pkill -f "${DEBUG_PROCESS_PATTERN}" 2>/dev/null || true
-pkill -f "${RELEASE_PROCESS_PATTERN}" 2>/dev/null || true
 pkill -f "${GO2RTC_APP_PATTERN}" 2>/dev/null || true
-pkill -x "${APP_NAME}" 2>/dev/null || true
 
 if [[ "${RUN_TESTS}" == "1" ]]; then
   log "==> swift test"
   swift test -q
 fi
 
-HOST_ARCH="$(uname -m)"
-ARCHES_VALUE="${HOST_ARCH}"
-
 log "==> package app"
-ARCHES="${ARCHES_VALUE}" APP_NAME="${APP_NAME}" BUNDLE_ID="com.cambar" MENU_BAR_APP=1 \
-  "${ROOT_DIR}/Scripts/package_app.sh" release
+"${ROOT_DIR}/Scripts/package_app.sh" release
 
 log "==> launch app"
-if ! open "${APP_BUNDLE}"; then
+if ! open -g -n "${APP_BUNDLE}"; then
   log "WARN: open failed; launching binary directly."
   "${APP_BUNDLE}/Contents/MacOS/${APP_NAME}" >/dev/null 2>&1 &
   disown
