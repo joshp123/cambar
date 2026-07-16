@@ -4,6 +4,13 @@ import SwiftUI
 
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
+    private enum PopoverPresentationState: String {
+        case closed
+        case opening
+        case open
+        case closing
+    }
+
     private let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
     private let popover = NSPopover()
     private let loginItemController = LoginItemController()
@@ -11,6 +18,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     private let playbackController = CameraPlaybackController()
     private var windowController: CameraWindowController?
     private var wakeObserver: NSObjectProtocol?
+    private var popoverState: PopoverPresentationState = .closed
+    private var wantsPopoverVisible = false
     private var debugPopoverRemaining = 0
     private var debugPopoverVisibleSeconds: TimeInterval = 2
     private var didRunDebugHooks = false
@@ -51,9 +60,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     }
 
     func applicationDidResignActive(_ notification: Notification) {
-        if popover.isShown {
-            popover.performClose(nil)
-        }
+        requestPopoverClose(reason: "application_resigned")
     }
 
     private func configureStatusItem() {
@@ -108,15 +115,49 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     }
 
     @objc private func togglePopover() {
-        if popover.isShown {
+        wantsPopoverVisible.toggle()
+        DirectStreamTelemetry.record(
+            component: "app",
+            event: "status_click",
+            surface: "menu",
+            detail: "desired=\(wantsPopoverVisible) state=\(popoverState.rawValue)"
+        )
+        reconcilePopoverVisibility()
+    }
+
+    private func requestPopoverOpen() {
+        wantsPopoverVisible = true
+        reconcilePopoverVisibility()
+    }
+
+    private func requestPopoverClose(reason: String) {
+        guard wantsPopoverVisible || popoverState != .closed else { return }
+        wantsPopoverVisible = false
+        DirectStreamTelemetry.record(
+            component: "app",
+            event: "menu_close_requested",
+            surface: "menu",
+            detail: "reason=\(reason) state=\(popoverState.rawValue)"
+        )
+        reconcilePopoverVisibility()
+    }
+
+    private func reconcilePopoverVisibility() {
+        switch (popoverState, wantsPopoverVisible) {
+        case (.closed, true):
+            presentPopoverFromStatusItem()
+        case (.open, false):
+            popoverState = .closing
             popover.performClose(nil)
-        } else {
-            showPopoverFromStatusItem()
+        case (.opening, _), (.closing, _), (.closed, false), (.open, true):
+            break
         }
     }
 
-    private func showPopoverFromStatusItem() {
+    private func presentPopoverFromStatusItem() {
         guard let button = statusItem.button else { return }
+        guard popoverState == .closed, wantsPopoverVisible else { return }
+        popoverState = .opening
         if windowController?.window?.isVisible == true {
             windowController?.close()
         }
@@ -141,9 +182,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         }
         NSApp.activate(ignoringOtherApps: true)
         windowController?.present()
-        if popover.isShown {
-            popover.performClose(nil)
-        }
+        requestPopoverClose(reason: "window_opened")
     }
 
     private func bestPopoverVideoSize(anchorButton: NSStatusBarButton?) -> NSSize {
@@ -159,14 +198,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     }
 
     func popoverWillShow(_ notification: Notification) {
+        popoverState = .opening
+        DirectStreamTelemetry.record(component: "app", event: "menu_will_show", surface: "menu")
         playbackController.show(.menu)
     }
 
     func popoverDidShow(_ notification: Notification) {
+        popoverState = .open
         DirectStreamTelemetry.record(component: "app", event: "menu_did_show", surface: "menu")
+        reconcilePopoverVisibility()
+    }
+
+    func popoverWillClose(_ notification: Notification) {
+        popoverState = .closing
+        DirectStreamTelemetry.record(component: "app", event: "menu_will_close", surface: "menu")
     }
 
     func popoverDidClose(_ notification: Notification) {
+        popoverState = .closed
         DirectStreamTelemetry.record(component: "app", event: "menu_closed", surface: "menu")
         playbackController.hide(.menu)
         if debugPopoverRemaining > 1 {
@@ -177,6 +226,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         } else if debugPopoverRemaining == 1 {
             debugPopoverRemaining = 0
         }
+        reconcilePopoverVisibility()
     }
 
     private func runReadyDebugHooksOnce() {
@@ -196,18 +246,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
             debugPopoverVisibleSeconds = TimeInterval(ProcessInfo.processInfo.environment["CAMBAR_DEBUG_POPOVER_VISIBLE_SECONDS"] ?? "2") ?? 2
             DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in self?.runNextDebugPopoverCycle() }
         } else if ProcessInfo.processInfo.environment["CAMBAR_OPEN_POPOVER"] == "1" {
-            DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in self?.showPopoverFromStatusItem() }
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in self?.requestPopoverOpen() }
         }
     }
 
     private func runNextDebugPopoverCycle() {
         guard debugPopoverRemaining > 0 else { return }
         DirectStreamTelemetry.record(component: "app", event: "debug_popover_cycle", surface: "menu")
-        showPopoverFromStatusItem()
+        requestPopoverOpen()
         guard debugPopoverRemaining > 1 else { return }
         DispatchQueue.main.asyncAfter(deadline: .now() + debugPopoverVisibleSeconds) { [weak self] in
-            guard let self, self.popover.isShown else { return }
-            self.popover.performClose(nil)
+            self?.requestPopoverClose(reason: "debug_cycle")
         }
     }
 }

@@ -22,7 +22,6 @@ final class CameraPlaybackController: NSObject, WKNavigationDelegate, WKScriptMe
     private var restartTask: Task<Void, Never>?
     private let parkingView = CameraVideoContainerView(cornerStyle: .square)
     private lazy var parkingWindow = makeParkingWindow()
-    private let diagnosticsEnabled = ProcessInfo.processInfo.environment["CAMBAR_DIAGNOSTICS"] == "1"
 
     func setRelayState(available: Bool, ready: Bool) {
         relayAvailable = available
@@ -43,10 +42,17 @@ final class CameraPlaybackController: NSObject, WKNavigationDelegate, WKScriptMe
     }
 
     func register(_ container: CameraVideoContainerView, for surface: Surface) {
+        let isNewContainer = containers[surface]?.view !== container
         containers[surface] = WeakVideoContainer(container)
-        if activeSurface == surface, let webView = session?.webView {
-            attach(webView, to: container)
+        guard activeSurface == surface else { return }
+        if isNewContainer {
+            DirectStreamTelemetry.record(
+                component: "video",
+                event: "surface_registered",
+                surface: surface.rawValue
+            )
         }
+        resumeOpen(on: surface)
     }
 
     func unregister(_ container: CameraVideoContainerView, for surface: Surface) {
@@ -73,6 +79,7 @@ final class CameraPlaybackController: NSObject, WKNavigationDelegate, WKScriptMe
         let token = UUID().uuidString
         openToken = token
         openStartedAt = ProcessInfo.processInfo.systemUptime
+        containers[surface]?.view?.showCover(true)
 
         guard relayReady else { return }
         resumeOpen(on: surface)
@@ -82,14 +89,20 @@ final class CameraPlaybackController: NSObject, WKNavigationDelegate, WKScriptMe
         if session == nil {
             startSession()
         }
-        guard let session else { return }
-        if let container = containers[surface]?.view {
-            attach(session.webView, to: container)
+        guard let session,
+              let container = containers[surface]?.view else {
+            DirectStreamTelemetry.record(
+                component: "video",
+                event: "open_waiting_for_surface",
+                surface: surface.rawValue
+            )
+            return
         }
-        if let openToken {
-            requestFreshOpenFrame(token: openToken)
-            startOpenWatchdog(token: openToken)
-        }
+        attach(session.webView, to: container)
+        guard let openToken else { return }
+        container.showCover(true)
+        requestFreshOpenFrame(token: openToken)
+        startOpenWatchdog(token: openToken)
     }
 
     func hide(_ surface: Surface) {
@@ -146,11 +159,12 @@ final class CameraPlaybackController: NSObject, WKNavigationDelegate, WKScriptMe
             startupWatchdog = nil
         case "open_frame":
             guard let token = body["token"] as? String, token == openToken,
-                  let surface = activeSurface else { return }
+                  let surface = activeSurface,
+                  let container = containers[surface]?.view else { return }
             openToken = nil
             openWatchdog?.cancel()
             openWatchdog = nil
-            containers[surface]?.view?.showCover(false)
+            container.showCover(false)
             let openElapsed = openStartedAt.map {
                 Int((ProcessInfo.processInfo.systemUptime - $0) * 1_000)
             }
@@ -160,9 +174,7 @@ final class CameraPlaybackController: NSObject, WKNavigationDelegate, WKScriptMe
                 surface: surface.rawValue,
                 elapsedMilliseconds: openElapsed
             )
-            if diagnosticsEnabled {
-                recordSnapshot(surface: surface, openElapsed: openElapsed)
-            }
+            recordSnapshot(surface: surface, openElapsed: openElapsed)
         case "video_error":
             recover(reason: event)
         case "frame_stalled":
@@ -219,10 +231,16 @@ final class CameraPlaybackController: NSObject, WKNavigationDelegate, WKScriptMe
     }
 
     private func attach(_ webView: WKWebView, to container: CameraVideoContainerView) {
-        container.attach(webView)
+        if webView.superview !== container {
+            container.attach(webView)
+            DirectStreamTelemetry.record(
+                component: "video",
+                event: "surface_attached",
+                surface: activeSurface?.rawValue
+            )
+        }
         if container !== parkingView {
             parkingWindow.orderOut(nil)
-            container.showCover(true)
         }
     }
 
@@ -322,6 +340,7 @@ final class CameraPlaybackController: NSObject, WKNavigationDelegate, WKScriptMe
         guard let webView = session?.webView else { return }
         let configuration = WKSnapshotConfiguration()
         configuration.rect = webView.bounds
+        configuration.snapshotWidth = 64
         webView.takeSnapshot(with: configuration) { image, _ in
             Task { @MainActor in
                 guard let image,

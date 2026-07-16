@@ -22,7 +22,6 @@ struct CameraVideoView: NSViewRepresentable {
 
     func updateNSView(_ nsView: CameraVideoContainerView, context: Context) {
         nsView.setCornerStyle(cornerStyle)
-        playback.register(nsView, for: surface)
     }
 
     static func dismantleNSView(_ nsView: CameraVideoContainerView, coordinator: Coordinator) {
