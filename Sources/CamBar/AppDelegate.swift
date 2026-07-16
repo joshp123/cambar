@@ -175,13 +175,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     }
 
     @objc private func handleStatusItemClick() {
-        guard let event = NSApp.currentEvent else { return }
-        if event.type == .rightMouseUp || event.modifierFlags.contains(.control) {
+        let event = NSApp.currentEvent
+        if let event,
+           event.type == .rightMouseUp || event.modifierFlags.contains(.control) {
             requestPopoverClose(reason: "status_context_menu", at: event.timestamp)
             showStatusMenu(for: event)
             return
         }
-        let command = popoverPresentation.toggle(at: event.timestamp)
+        let command = popoverPresentation.toggle(
+            at: event?.timestamp ?? ProcessInfo.processInfo.systemUptime
+        )
         DirectStreamTelemetry.record(
             component: "app",
             event: "status_click",

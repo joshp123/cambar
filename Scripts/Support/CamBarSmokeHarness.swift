@@ -10,7 +10,13 @@ private let telemetryURL = FileManager.default.homeDirectoryForCurrentUser
     .appendingPathComponent("Library/Caches/CamBar/direct/direct-stream-events.jsonl")
 
 private struct Options {
+    enum InputMode: Equatable {
+        case accessibility
+        case physical
+    }
+
     var warmCycles = 3
+    var inputMode = InputMode.accessibility
     var screenshotPath = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
         .appendingPathComponent(".build/smoke-ui-popover.png").path
 
@@ -32,8 +38,10 @@ private struct Options {
                 }
                 result.screenshotPath = NSString(string: value).expandingTildeInPath
                 arguments.removeFirst()
+            case "--physical-clicks":
+                result.inputMode = .physical
             case "-h", "--help":
-                print("Usage: smoke_ui.sh [--warm-cycles COUNT] [--screenshot PATH]")
+                print("Usage: smoke_ui.sh [--warm-cycles COUNT] [--screenshot PATH] [--physical-clicks]")
                 exit(0)
             default:
                 throw SmokeError.message("unknown argument: \(argument)")
@@ -175,6 +183,7 @@ private final class TelemetryReader {
 
 private final class StatusItemDriver {
     private let processIdentifier: pid_t
+    private var statusElement: AXUIElement?
 
     init(processIdentifier: pid_t) {
         self.processIdentifier = processIdentifier
@@ -184,6 +193,7 @@ private final class StatusItemDriver {
         let deadline = Date().addingTimeInterval(timeout)
         repeat {
             if let element = findStatusItem(), let frame = frame(of: element), !frame.isEmpty {
+                statusElement = element
                 return frame
             }
             RunLoop.current.run(until: Date().addingTimeInterval(0.1))
@@ -191,17 +201,45 @@ private final class StatusItemDriver {
         throw SmokeError.message("could not locate AX identifier \(statusItemIdentifier)")
     }
 
-    func click(frame: CGRect) throws {
+    func click(frame: CGRect, inputMode: Options.InputMode) throws {
+        if inputMode == .physical {
+            try clickPhysically(frame: frame)
+            return
+        }
+        guard let statusElement else {
+            throw SmokeError.message("status item accessibility element was not retained")
+        }
+        let result = AXUIElementPerformAction(statusElement, kAXPressAction as CFString)
+        guard result == .success else {
+            throw SmokeError.message("status item AX press failed with error \(result.rawValue)")
+        }
+        print("Pressed status item frame=\(NSStringFromRect(frame))")
+    }
+
+    private func clickPhysically(frame: CGRect) throws {
         let originalLocation = CGEvent(source: nil)?.location ?? NSEvent.mouseLocation
         defer { CGWarpMouseCursorPosition(originalLocation) }
-
         let target = CGPoint(x: frame.midX, y: frame.midY)
-        print("Clicking status item frame=\(NSStringFromRect(frame)) target=\(NSStringFromPoint(target))")
         guard let source = CGEventSource(stateID: .hidSystemState),
-              let moved = CGEvent(mouseEventSource: source, mouseType: .mouseMoved, mouseCursorPosition: target, mouseButton: .left),
-              let down = CGEvent(mouseEventSource: source, mouseType: .leftMouseDown, mouseCursorPosition: target, mouseButton: .left),
-              let up = CGEvent(mouseEventSource: source, mouseType: .leftMouseUp, mouseCursorPosition: target, mouseButton: .left) else {
-            throw SmokeError.message("could not construct Quartz mouse events")
+              let moved = CGEvent(
+                mouseEventSource: source,
+                mouseType: .mouseMoved,
+                mouseCursorPosition: target,
+                mouseButton: .left
+              ),
+              let down = CGEvent(
+                mouseEventSource: source,
+                mouseType: .leftMouseDown,
+                mouseCursorPosition: target,
+                mouseButton: .left
+              ),
+              let up = CGEvent(
+                mouseEventSource: source,
+                mouseType: .leftMouseUp,
+                mouseCursorPosition: target,
+                mouseButton: .left
+              ) else {
+            throw SmokeError.message("could not construct physical Quartz mouse events")
         }
         moved.post(tap: .cghidEventTap)
         usleep(30_000)
@@ -215,6 +253,7 @@ private final class StatusItemDriver {
         usleep(40_000)
         up.post(tap: .cghidEventTap)
         usleep(40_000)
+        print("Physically clicked status item frame=\(NSStringFromRect(frame))")
     }
 
     private func findStatusItem() -> AXUIElement? {
@@ -570,7 +609,7 @@ private func run() throws {
     for cycle in 1...totalOpenCycles {
         let phase = cycle == 1 ? "cold" : "warm \(cycle - 1)/\(options.warmCycles)"
         let statusClicksBeforeOpen = try telemetry.count("status_click", surface: "menu")
-        try driver.click(frame: statusFrame)
+        try driver.click(frame: statusFrame, inputMode: options.inputMode)
         try telemetry.waitForCount(
             "status_click",
             count: statusClicksBeforeOpen + 1,
@@ -588,7 +627,7 @@ private func run() throws {
         }
 
         let statusClicksBeforeClose = try telemetry.count("status_click", surface: "menu")
-        try driver.click(frame: statusFrame)
+        try driver.click(frame: statusFrame, inputMode: options.inputMode)
         try telemetry.waitForCount(
             "status_click",
             count: statusClicksBeforeClose + 1,
@@ -605,7 +644,8 @@ private func run() throws {
 
     try assertExactCounts(telemetry: telemetry, opens: totalOpenCycles, closes: totalOpenCycles)
     try frontmost.assertUnchanged("at completion")
-    print("PASS: \(totalOpenCycles) open/close cycles, exact click intents, no recovery or black-frame telemetry")
+    let inputDescription = options.inputMode == .physical ? "physical clicks" : "accessibility presses"
+    print("PASS: \(totalOpenCycles) open/close cycles via \(inputDescription), exact intents, no recovery or black-frame telemetry")
 }
 
 do {
