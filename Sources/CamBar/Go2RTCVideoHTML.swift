@@ -39,6 +39,7 @@ extension CameraPlaybackController {
             let sawFirstFrame = false;
             let lastFrameAt = performance.now();
             let stallReported = false;
+            let stallTimer = null;
 
             function emit(event, values = {}) {
               try {
@@ -114,11 +115,15 @@ extension CameraPlaybackController {
               const onFrame = (_now, metadata) => {
                 noteFrame(metadata.presentedFrames);
                 if (pendingOpen) {
-                  completeOpen(pendingOpen.token, {
+                  const token = pendingOpen.token;
+                  const values = {
                     presentedFrames: metadata.presentedFrames,
                     mediaTime: metadata.mediaTime,
-                    source: 'video_frame_callback'
-                  });
+                    source: 'video_frame_callback_after_paint'
+                  };
+                  requestAnimationFrame(() => requestAnimationFrame(() => {
+                    completeOpen(token, values);
+                  }));
                 }
                 video.requestVideoFrameCallback(onFrame);
               };
@@ -137,6 +142,10 @@ extension CameraPlaybackController {
                 this.video.autoplay = true;
                 this.video.muted = true;
                 this.video.disablePictureInPicture = true;
+                this.video.addEventListener('loadedmetadata', () => emit('loaded_metadata', {
+                  detail: JSON.stringify({width: this.video.videoWidth, height: this.video.videoHeight})
+                }));
+                this.video.addEventListener('playing', () => emit('playing'));
                 this.video.addEventListener('error', () => emit('video_error'));
                 watchFrames(this.video);
               }
@@ -151,18 +160,37 @@ extension CameraPlaybackController {
             player.src = new URL('api/ws?src=' + encodeURIComponent('\(streamName)'), location.href);
             document.body.appendChild(player);
 
-            const stallTimer = setInterval(() => {
-              if (sawFirstFrame && !stallReported && performance.now() - lastFrameAt > 2000) {
-                stallReported = true;
-                emit('frame_stalled');
-              }
-            }, 500);
+            function startStallTimer() {
+              if (stallTimer !== null) return;
+              lastFrameAt = performance.now();
+              stallReported = false;
+              stallTimer = setInterval(() => {
+                if (sawFirstFrame && !stallReported && performance.now() - lastFrameAt > 2000) {
+                  stallReported = true;
+                  emit('frame_stalled');
+                }
+              }, 500);
+            }
+
+            function stopStallTimer() {
+              if (stallTimer === null) return;
+              clearInterval(stallTimer);
+              stallTimer = null;
+            }
 
             window.__cambarStop = () => {
               clearInterval(stallTimer);
               pendingOpen = null;
               try { player.ondisconnect(); } catch (_) {}
               try { player.remove(); } catch (_) {}
+            };
+            window.__cambarSetVisible = visible => {
+              if (visible) {
+                startStallTimer();
+                player.video && player.video.play().catch(() => {});
+              } else {
+                stopStallTimer();
+              }
             };
             window.__cambarResume = () => {
               player.video && player.video.play().catch(() => {});

@@ -28,5 +28,9 @@ if rg -n 'parkingWindow|parkingView|alphaValue\s*=\s*0\.0?1' Sources; then
   fail "release source contains an offscreen WebKit parking path"
 fi
 
+if rg -n 'startupWatchdog|startup_timeout' Sources; then
+  fail "release source contains a hidden-surface startup watchdog"
+fi
+
 swift test -q
 echo "Release source safety checks passed."

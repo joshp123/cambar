@@ -63,6 +63,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         let image = NSImage(systemSymbolName: "video.fill", accessibilityDescription: "CamBar")
         image?.isTemplate = true
         button.image = image
+        button.setAccessibilityLabel("CamBar")
+        button.setAccessibilityIdentifier("com.cambar.status-item")
         button.sendAction(on: [.leftMouseUp, .rightMouseUp])
         button.target = self
         button.action = #selector(handleStatusItemClick)
@@ -103,10 +105,42 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
             matching: [.leftMouseDown, .rightMouseDown, .otherMouseDown]
         ) { [weak self] event in
             let timestamp = event.timestamp
+            let screenPoint = NSEvent.mouseLocation
+            let windowNumber = event.windowNumber
             Task { @MainActor [weak self] in
-                self?.requestPopoverClose(reason: "outside_click", at: timestamp)
+                self?.handleGlobalMouseDown(
+                    screenPoint: screenPoint,
+                    windowNumber: windowNumber,
+                    timestamp: timestamp
+                )
             }
         }
+    }
+
+    private func handleGlobalMouseDown(
+        screenPoint: NSPoint,
+        windowNumber: Int,
+        timestamp: TimeInterval
+    ) {
+        if let button = statusItem.button,
+           let window = button.window {
+            let rectInWindow = button.convert(button.bounds, to: nil)
+            let screenRect = window.convertToScreen(rectInWindow)
+            if StatusItemHitRegion.contains(
+                screenPoint: screenPoint,
+                eventWindowNumber: windowNumber,
+                statusRect: screenRect,
+                statusWindowNumber: window.windowNumber
+            ) {
+                DirectStreamTelemetry.record(
+                    component: "app",
+                    event: "status_hit_ignored_by_outside_monitor",
+                    surface: "menu"
+                )
+                return
+            }
+        }
+        requestPopoverClose(reason: "outside_click", at: timestamp)
     }
 
     private func stopMonitoringOutsideClicks() {
@@ -189,7 +223,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         case .show:
             presentPopoverFromStatusItem()
         case .close:
-            popover.performClose(nil)
+            popover.close()
         case .none:
             break
         }
@@ -214,7 +248,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
                   self.popoverPresentation.phase == .opening else { return }
             if self.popover.isShown {
                 DirectStreamTelemetry.record(component: "app", event: "menu_show_confirmed", surface: "menu")
-                self.apply(self.popoverPresentation.didShow())
+                self.confirmPopoverShown()
             } else {
                 DirectStreamTelemetry.record(component: "app", event: "menu_show_failed", surface: "menu")
                 self.popoverPresentation.presentationFailed()
@@ -256,12 +290,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
 
     func popoverWillShow(_ notification: Notification) {
         DirectStreamTelemetry.record(component: "app", event: "menu_will_show", surface: "menu")
-        playbackController.show()
     }
 
     func popoverDidShow(_ notification: Notification) {
         DirectStreamTelemetry.record(component: "app", event: "menu_did_show", surface: "menu")
-        apply(popoverPresentation.didShow())
+        confirmPopoverShown()
+    }
+
+    private func confirmPopoverShown() {
+        let shouldStartPlayback = popoverPresentation.phase == .opening
+            && popoverPresentation.wantsVisible
+        let command = popoverPresentation.didShow()
+        if shouldStartPlayback,
+           popoverPresentation.phase == .open,
+           popoverPresentation.wantsVisible {
+            playbackController.show()
+        }
+        apply(command)
     }
 
     func popoverWillClose(_ notification: Notification) {

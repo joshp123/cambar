@@ -20,7 +20,6 @@ final class CameraPlaybackController: NSObject, WKNavigationDelegate, WKScriptMe
     private var openToken: String?
     private var openStartedAt: TimeInterval?
     private var restartCount = 0
-    private var startupWatchdog: Task<Void, Never>?
     private var openWatchdog: Task<Void, Never>?
     private var stallWatchdog: Task<Void, Never>?
     private var restartTask: Task<Void, Never>?
@@ -59,6 +58,7 @@ final class CameraPlaybackController: NSObject, WKNavigationDelegate, WKScriptMe
 
     func hide() {
         isVisible = false
+        setJavaScriptVisibility(false)
         openToken = nil
         openStartedAt = nil
         openWatchdog?.cancel()
@@ -102,18 +102,22 @@ final class CameraPlaybackController: NSObject, WKNavigationDelegate, WKScriptMe
         if session == nil {
             startSession()
         }
-        guard let session, let openToken else { return }
+        guard session != nil, let openToken else { return }
         container.showCover(true)
+        setJavaScriptVisibility(true)
         requestFreshOpenFrame(token: openToken)
-        if session.hasFrame {
-            startOpenWatchdog(token: openToken)
-        }
+        startOpenWatchdog(token: openToken)
     }
 
     private func beginPresentation() {
         openToken = UUID().uuidString
         openStartedAt = ProcessInfo.processInfo.systemUptime
         container.showCover(true)
+        DirectStreamTelemetry.record(
+            component: "video",
+            event: "presentation_started",
+            surface: surface.rawValue
+        )
     }
 
     func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
@@ -137,13 +141,8 @@ final class CameraPlaybackController: NSObject, WKNavigationDelegate, WKScriptMe
 
         switch event {
         case "first_frame":
-            session?.hasFrame = true
-            restartCount = 0
-            startupWatchdog?.cancel()
-            startupWatchdog = nil
             if isVisible, let openToken {
                 requestFreshOpenFrame(token: openToken)
-                startOpenWatchdog(token: openToken)
             }
         case "frame_candidate":
             acceptOpenFrame(body)
@@ -163,6 +162,7 @@ final class CameraPlaybackController: NSObject, WKNavigationDelegate, WKScriptMe
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
         guard webView === session?.webView, isVisible, let openToken else { return }
+        setJavaScriptVisibility(true)
         requestFreshOpenFrame(token: openToken)
     }
 
@@ -181,6 +181,7 @@ final class CameraPlaybackController: NSObject, WKNavigationDelegate, WKScriptMe
               let token = body["token"] as? String,
               token == openToken else { return }
         openToken = nil
+        restartCount = 0
         openWatchdog?.cancel()
         openWatchdog = nil
         container.showCover(false)
@@ -213,7 +214,6 @@ final class CameraPlaybackController: NSObject, WKNavigationDelegate, WKScriptMe
         session = VideoSession(generation: generation, webView: webView)
         DirectStreamTelemetry.record(component: "video", event: "session_started", surface: surface.rawValue)
         webView.loadHTMLString(Self.html(generation: generation), baseURL: URL(string: "http://127.0.0.1:1984/"))
-        startStartupWatchdog(generation: generation)
     }
 
     private func requestFreshOpenFrame(token: String) {
@@ -222,15 +222,10 @@ final class CameraPlaybackController: NSObject, WKNavigationDelegate, WKScriptMe
         webView.evaluateJavaScript("window.__cambarMarkOpen && window.__cambarMarkOpen(\(encoded));")
     }
 
-    private func startStartupWatchdog(generation: String) {
-        startupWatchdog?.cancel()
-        startupWatchdog = Task { [weak self] in
-            try? await Task.sleep(for: .seconds(4))
-            guard !Task.isCancelled, let self,
-                  self.session?.generation == generation,
-                  self.session?.hasFrame != true else { return }
-            self.recover(reason: "startup_timeout")
-        }
+    private func setJavaScriptVisibility(_ visible: Bool) {
+        session?.webView.evaluateJavaScript(
+            "window.__cambarSetVisible && window.__cambarSetVisible(\(visible ? "true" : "false"));"
+        )
     }
 
     private func startOpenWatchdog(token: String) {
@@ -284,12 +279,13 @@ final class CameraPlaybackController: NSObject, WKNavigationDelegate, WKScriptMe
             try? await Task.sleep(for: .seconds(delay))
             guard !Task.isCancelled, let self, self.relayAvailable, !self.isSuspended else { return }
             self.startSession()
+            if self.isVisible, self.relayReady {
+                self.resumeOpen()
+            }
         }
     }
 
     private func tearDownSession(reason: String) {
-        startupWatchdog?.cancel()
-        startupWatchdog = nil
         openWatchdog?.cancel()
         openWatchdog = nil
         stallWatchdog?.cancel()
@@ -318,7 +314,6 @@ final class CameraPlaybackController: NSObject, WKNavigationDelegate, WKScriptMe
     private final class VideoSession {
         let generation: String
         let webView: WKWebView
-        var hasFrame = false
 
         init(generation: String, webView: WKWebView) {
             self.generation = generation
@@ -337,6 +332,7 @@ private final class CameraWebView: WKWebView {
 final class CameraVideoContainerView: NSView {
     private let cover = NSView()
     private let progressIndicator = NSProgressIndicator()
+    private let loadingLabel = NSTextField(labelWithString: "Connecting…")
     private var cornerStyle: CameraVideoCornerStyle
 
     init(cornerStyle: CameraVideoCornerStyle) {
@@ -350,7 +346,11 @@ final class CameraVideoContainerView: NSView {
         cover.layer?.backgroundColor = NSColor.black.cgColor
         progressIndicator.style = .spinning
         progressIndicator.controlSize = .small
+        loadingLabel.font = .systemFont(ofSize: 13, weight: .medium)
+        loadingLabel.textColor = NSColor.white.withAlphaComponent(0.78)
+        loadingLabel.alignment = .center
         cover.addSubview(progressIndicator)
+        cover.addSubview(loadingLabel)
         addSubview(cover)
     }
 
@@ -381,7 +381,12 @@ final class CameraVideoContainerView: NSView {
         progressIndicator.sizeToFit()
         progressIndicator.frame.origin = NSPoint(
             x: floor((cover.bounds.width - progressIndicator.frame.width) / 2),
-            y: floor((cover.bounds.height - progressIndicator.frame.height) / 2)
+            y: floor((cover.bounds.height - progressIndicator.frame.height) / 2) - 14
+        )
+        loadingLabel.sizeToFit()
+        loadingLabel.frame.origin = NSPoint(
+            x: floor((cover.bounds.width - loadingLabel.frame.width) / 2),
+            y: progressIndicator.frame.maxY + 9
         )
     }
 

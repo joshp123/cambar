@@ -2,6 +2,55 @@ import XCTest
 import CamBarCore
 
 final class CamBarTests: XCTestCase {
+    func testStatusItemHitRegionUsesWindowIdentity() {
+        XCTAssertTrue(StatusItemHitRegion.contains(
+            screenPoint: CGPoint(x: -10_000, y: -10_000),
+            eventWindowNumber: 42,
+            statusRect: CGRect(x: 100, y: 100, width: 24, height: 24),
+            statusWindowNumber: 42
+        ))
+    }
+
+    func testStatusItemHitRegionUsesScreenCoordinatesAndTolerance() {
+        let rect = CGRect(x: -1200, y: 900, width: 24, height: 24)
+
+        XCTAssertTrue(StatusItemHitRegion.contains(
+            screenPoint: CGPoint(x: -1201, y: 912),
+            eventWindowNumber: 0,
+            statusRect: rect,
+            statusWindowNumber: 17
+        ))
+        XCTAssertFalse(StatusItemHitRegion.contains(
+            screenPoint: CGPoint(x: -1203, y: 912),
+            eventWindowNumber: 0,
+            statusRect: rect,
+            statusWindowNumber: 17
+        ))
+        XCTAssertFalse(StatusItemHitRegion.contains(
+            screenPoint: CGPoint(x: -1188, y: 927),
+            eventWindowNumber: 0,
+            statusRect: rect,
+            statusWindowNumber: 17
+        ))
+    }
+
+    func testStatusClickRemainsSoleCloseIntentWhenMonitorIgnoresHit() {
+        var state = PopoverPresentationState()
+        XCTAssertEqual(state.toggle(at: 1), .show)
+        XCTAssertEqual(state.didShow(), .none)
+        XCTAssertTrue(StatusItemHitRegion.contains(
+            screenPoint: CGPoint(x: 112, y: 112),
+            eventWindowNumber: 0,
+            statusRect: CGRect(x: 100, y: 100, width: 24, height: 24),
+            statusWindowNumber: 17
+        ))
+
+        XCTAssertEqual(state.toggle(at: 2), .close)
+        XCTAssertEqual(state.didClose(), .none)
+        XCTAssertEqual(state.phase, .closed)
+        XCTAssertFalse(state.wantsVisible)
+    }
+
     func testPopoverOutsideCloseCannotReopenItself() {
         var state = PopoverPresentationState()
 
