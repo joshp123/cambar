@@ -5,12 +5,19 @@ import SwiftUI
 final class CameraWindowController: NSWindowController, NSWindowDelegate {
     private let onClose: () -> Void
 
-    init(onClose: @escaping () -> Void = {}) {
+    init(
+        playback: CameraPlaybackController,
+        nativeVideoSize: CGSize,
+        onClose: @escaping () -> Void = {}
+    ) {
         self.onClose = onClose
-        let hosting = NSHostingController(rootView: CameraWindowView())
+        let hosting = NSHostingController(rootView: CameraWindowView(playback: playback))
         let window = NSWindow(contentViewController: hosting)
         window.title = "CamBar"
-        window.setContentSize(NSSize(width: 1280, height: 720))
+        let initialWidth: CGFloat = 1280
+        let initialSize = NSSize(width: initialWidth, height: initialWidth * nativeVideoSize.height / nativeVideoSize.width)
+        window.setContentSize(initialSize)
+        window.contentAspectRatio = nativeVideoSize
         window.styleMask = [.titled, .closable, .resizable, .miniaturizable]
         window.isReleasedWhenClosed = false
         super.init(window: window)
@@ -28,8 +35,10 @@ final class CameraWindowController: NSWindowController, NSWindowDelegate {
 }
 
 struct CameraWindowView: View {
+    let playback: CameraPlaybackController
+
     var body: some View {
-        Go2RTCVideoView(surface: "window")
+        CameraVideoView(playback: playback, surface: .window, cornerRadius: 0)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .background(Color.black)
     }

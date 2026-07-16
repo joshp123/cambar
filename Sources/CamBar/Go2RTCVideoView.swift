@@ -3,341 +3,311 @@ import CamBarCore
 import WebKit
 
 @MainActor
-final class VideoHostView: NSView, WKNavigationDelegate, WKScriptMessageHandler {
-    let surface: String
-    var autoStart: Bool
+final class CameraPlaybackController: NSObject, WKNavigationDelegate, WKScriptMessageHandler {
+    enum Surface: String, CaseIterable, Sendable {
+        case menu
+        case window
+    }
 
+    enum Phase: Equatable {
+        case idle
+        case warming
+        case warm
+        case opening(Surface)
+        case playing(Surface)
+        case retrying
+    }
+
+    var onPhaseChange: ((Phase) -> Void)?
+
+    private(set) var phase: Phase = .idle {
+        didSet {
+            guard phase != oldValue else { return }
+            onPhaseChange?(phase)
+        }
+    }
+
+    private var relayReady = false
     private var session: VideoSession?
-    private var pendingClipPath: String?
-    private var deferredStartScheduled = false
-    private var hasRevealedFrame = false
-    private var lastOpenTime: TimeInterval?
-    private var lastSnapshotOpenTime: TimeInterval?
-    private var parkingWindow: NSWindow?
-    private let parkingView = NSView(frame: NSRect(x: 0, y: 0, width: 16, height: 9))
-    private let overlayView = NSView()
+    private var activeSurface: Surface?
+    private var containers: [Surface: WeakVideoContainer] = [:]
+    private var openToken: String?
+    private var openStartedAt: TimeInterval?
+    private var restartCount = 0
+    private var startupWatchdog: Task<Void, Never>?
+    private var openWatchdog: Task<Void, Never>?
+    private var restartTask: Task<Void, Never>?
+    private let parkingView = CameraVideoContainerView(cornerRadius: 0)
+    private lazy var parkingWindow = makeParkingWindow()
+    private let diagnosticsEnabled = ProcessInfo.processInfo.environment["CAMBAR_DIAGNOSTICS"] == "1"
 
-    init(surface: String, autoStart: Bool) {
-        self.surface = surface
-        self.autoStart = autoStart
-        super.init(frame: .zero)
-        wantsLayer = true
-        layer?.backgroundColor = NSColor.black.cgColor
-        overlayView.wantsLayer = true
-        overlayView.layer?.backgroundColor = NSColor.black.cgColor
-    }
-
-    @available(*, unavailable)
-    required init?(coder: NSCoder) {
-        nil
-    }
-
-    override var isFlipped: Bool {
-        true
-    }
-
-    override func viewDidMoveToWindow() {
-        super.viewDidMoveToWindow()
-        DirectStreamTelemetry.record(
-            component: "direct-video",
-            event: "view_host_state",
-            stream: Go2RTCRelayController.mainStreamName,
-            surface: surface,
-            detail: hostStateDetail(reason: "view_did_move_to_window")
-        )
-        if window == nil {
-            deferredStartScheduled = false
-            parkSession(reason: "view_removed_from_window")
-        } else if autoStart {
-            startIfVisible()
+    func setRelayReady(_ ready: Bool, warmSize: CGSize) {
+        relayReady = ready
+        if ready {
+            warm(size: warmSize)
+        } else {
+            tearDownSession(reason: "relay_unavailable")
+            phase = .idle
         }
     }
 
-    override func layout() {
-        super.layout()
-        session?.webView.frame = bounds
-        overlayView.frame = bounds
-        if autoStart, session == nil {
-            startIfVisible()
+    func register(_ container: CameraVideoContainerView, for surface: Surface) {
+        containers[surface] = WeakVideoContainer(container)
+        if activeSurface == surface, let webView = session?.webView {
+            attach(webView, to: container)
         }
     }
 
-    func startIfVisible() {
-        guard let window else { return }
-        guard window.isVisible else {
-            deferStart(reason: "hidden_window")
-            return
+    func unregister(_ container: CameraVideoContainerView, for surface: Surface) {
+        guard containers[surface]?.view === container else { return }
+        containers[surface] = nil
+        if activeSurface == surface {
+            parkSession()
         }
-        if session != nil {
-            if let webView = session?.webView {
-                install(webView: webView)
-            }
-            DirectStreamTelemetry.record(
-                component: "direct-video",
-                event: "visible_session_reused",
-                stream: Go2RTCRelayController.mainStreamName,
-                surface: surface,
-                detail: currentGenerationDetail()
-            )
-            applyPendingClipPath()
-            if hasRevealedFrame {
-                overlayView.isHidden = true
-                if lastSnapshotOpenTime != lastOpenTime {
-                    lastSnapshotOpenTime = lastOpenTime
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
-                        self?.recordWebViewSnapshot(reason: "attach_revealed")
-                    }
-                }
-            } else {
-                showOverlay()
-            }
-            return
-        }
-        guard bounds.width > 1, bounds.height > 1 else {
-            deferStart(reason: "empty_bounds")
-            return
-        }
-        deferredStartScheduled = false
-        startVisibleSession(reason: "visible_start")
     }
 
     func warm(size: CGSize) {
-        if session != nil {
-            DirectStreamTelemetry.record(
-                component: "direct-video",
-                event: "warm_session_already_running",
-                stream: Go2RTCRelayController.mainStreamName,
-                surface: surface,
-                detail: currentGenerationDetail()
-            )
+        guard relayReady else { return }
+        parkingView.frame = NSRect(origin: .zero, size: CGSize(width: max(size.width, 320), height: max(size.height, 180)))
+        parkingWindow.setContentSize(parkingView.frame.size)
+        guard session == nil else {
+            if activeSurface == nil {
+                parkSession()
+            }
             return
         }
-        let warmSize = NSSize(width: max(size.width, 320), height: max(size.height, 180))
-        if bounds.width <= 1 || bounds.height <= 1 {
-            frame = NSRect(origin: frame.origin, size: warmSize)
+        startSession()
+    }
+
+    func show(_ surface: Surface) {
+        activeSurface = surface
+        let token = UUID().uuidString
+        openToken = token
+        openStartedAt = ProcessInfo.processInfo.systemUptime
+        phase = .opening(surface)
+
+        guard relayReady else { return }
+        if session == nil {
+            startSession()
         }
-        startVisibleSession(reason: "warm_start")
-    }
-
-    func markOpen() {
-        lastOpenTime = ProcessInfo.processInfo.systemUptime
-        lastSnapshotOpenTime = nil
-    }
-
-    private func deferStart(reason: String) {
-        guard !deferredStartScheduled else { return }
-        deferredStartScheduled = true
-        DirectStreamTelemetry.record(
-            component: "direct-video",
-            event: "visible_session_deferred",
-            stream: Go2RTCRelayController.mainStreamName,
-            surface: surface,
-            detail: hostStateDetail(reason: reason)
-        )
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in
-            guard let self else { return }
-            self.deferredStartScheduled = false
-            if self.window?.isVisible == true || reason == "empty_bounds" {
-                self.startIfVisible()
-            }
+        guard let session else { return }
+        if let container = containers[surface]?.view {
+            attach(session.webView, to: container)
         }
+        requestFreshOpenFrame(token: token)
+        startOpenWatchdog(token: token)
     }
 
-    func stopVisibleSession(reason: String) {
-        guard let session else { return }
-        DirectStreamTelemetry.record(
-            component: "direct-video",
-            event: "visible_session_stopping",
-            stream: Go2RTCRelayController.mainStreamName,
-            surface: surface,
-            detail: "generation=\(session.generation) reason=\(reason)"
-        )
-        let webView = session.webView
-        webView.evaluateJavaScript(Self.stopJavaScript())
-        webView.stopLoading()
-        webView.configuration.userContentController.removeScriptMessageHandler(forName: "cambarVideoEvent")
-        webView.removeFromSuperview()
-        parkingWindow?.orderOut(nil)
-        self.session = nil
-        deferredStartScheduled = false
-        hasRevealedFrame = false
-        showOverlay()
+    func hide(_ surface: Surface) {
+        guard activeSurface == surface else { return }
+        activeSurface = nil
+        openToken = nil
+        openStartedAt = nil
+        openWatchdog?.cancel()
+        openWatchdog = nil
+        parkSession()
+        phase = session?.hasFrame == true ? .warm : .warming
     }
 
-    func recordDOMState(reason: String) {
-        guard let session else { return }
-        let escapedReason = Self.jsString(reason)
-        let js = """
-        (function() {
-          const root = document.querySelector('simple-video');
-          const video = document.querySelector('video');
-          const pc = window.__cambarPeerConnections && window.__cambarPeerConnections[window.__cambarPeerConnections.length - 1];
-          const rect = (node) => {
-            if (!node) return null;
-            const r = node.getBoundingClientRect();
-            return {x: Math.round(r.x), y: Math.round(r.y), width: Math.round(r.width), height: Math.round(r.height)};
-          };
-          const quality = video && video.getVideoPlaybackQuality ? video.getVideoPlaybackQuality() : null;
-          const detail = JSON.stringify({
-            reason: \(escapedReason),
-            generation: '\(session.generation)',
-            viewport: {width: window.innerWidth, height: window.innerHeight},
-            documentVisibility: document.visibilityState,
-            root: rect(root),
-            video: rect(video),
-            rootConnected: root ? root.isConnected : null,
-            rootMode: root ? root.mode : null,
-            readyState: video ? video.readyState : null,
-            networkState: video ? video.networkState : null,
-            paused: video ? video.paused : null,
-            currentTime: video ? video.currentTime : null,
-            videoWidth: video ? video.videoWidth : null,
-            videoHeight: video ? video.videoHeight : null,
-            decodedFrames: video ? video.webkitDecodedFrameCount : null,
-            droppedFrames: video ? video.webkitDroppedFrameCount : null,
-            totalVideoFrames: quality ? quality.totalVideoFrames : null,
-            droppedVideoFrames: quality ? quality.droppedVideoFrames : null,
-            pcConnectionState: pc ? pc.connectionState : null,
-            pcIceConnectionState: pc ? pc.iceConnectionState : null,
-            pcSignalingState: pc ? pc.signalingState : null
-          });
-          window.__cambarPost && window.__cambarPost({ name: 'visual_state', detail });
-        })();
-        """
-        session.webView.evaluateJavaScript(js)
-        DirectStreamTelemetry.record(
-            component: "direct-video",
-            event: "view_probe_requested",
-            stream: Go2RTCRelayController.mainStreamName,
-            surface: surface,
-            detail: "generation=\(session.generation) reason=\(reason)"
-        )
+    func retryNow() {
+        restartCount = 0
+        recover(reason: "manual_retry")
     }
 
-    func applyClipPath(_ svgPath: String) {
-        pendingClipPath = svgPath
-        applyPendingClipPath()
+    func shutdown() {
+        relayReady = false
+        activeSurface = nil
+        restartTask?.cancel()
+        tearDownSession(reason: "shutdown")
+        parkingWindow.orderOut(nil)
+        phase = .idle
     }
 
     func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
         guard message.name == "cambarVideoEvent",
               let body = message.body as? [String: Any],
-              let event = body["name"] as? String else {
+              let event = body["event"] as? String,
+              let generation = body["generation"] as? String,
+              generation == session?.generation else {
             return
         }
-        let generation = body["generation"] as? String
-        guard generation == session?.generation else {
-            DirectStreamTelemetry.record(
-                component: "direct-video",
-                event: "stale_video_event_ignored",
-                stream: Go2RTCRelayController.mainStreamName,
-                surface: surface,
-                detail: "event=\(event)"
-            )
-            return
-        }
+
+        let elapsed = body["elapsed_ms"] as? Int
         DirectStreamTelemetry.record(
-            component: "direct-video",
+            component: "video",
             event: event,
             stream: Go2RTCRelayController.mainStreamName,
-            surface: surface,
-            elapsedMilliseconds: body["elapsed_ms"] as? Int,
+            surface: activeSurface?.rawValue,
+            elapsedMilliseconds: elapsed,
             detail: body["detail"] as? String
         )
-        if event == "fresh_enough" {
-            revealVideo()
+
+        switch event {
+        case "first_frame":
+            session?.hasFrame = true
+            restartCount = 0
+            startupWatchdog?.cancel()
+            startupWatchdog = nil
+            if activeSurface == nil {
+                phase = .warm
+            }
+        case "open_frame":
+            guard let token = body["token"] as? String, token == openToken,
+                  let surface = activeSurface else { return }
+            openToken = nil
+            openWatchdog?.cancel()
+            openWatchdog = nil
+            containers[surface]?.view?.showCover(false)
+            phase = .playing(surface)
+            let openElapsed = openStartedAt.map {
+                Int((ProcessInfo.processInfo.systemUptime - $0) * 1_000)
+            }
+            DirectStreamTelemetry.record(
+                component: "video",
+                event: "live_view",
+                surface: surface.rawValue,
+                elapsedMilliseconds: openElapsed
+            )
+            if diagnosticsEnabled {
+                recordSnapshot(surface: surface, openElapsed: openElapsed)
+            }
+        case "video_error", "frame_stalled":
+            recover(reason: event)
+        default:
+            break
         }
     }
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
-        DirectStreamTelemetry.record(
-            component: "direct-video",
-            event: "navigation_finished",
-            stream: Go2RTCRelayController.mainStreamName,
-            surface: surface,
-            detail: currentGenerationDetail()
-        )
-        applyPendingClipPath()
+        guard webView === session?.webView else { return }
+        if let openToken {
+            requestFreshOpenFrame(token: openToken)
+        }
     }
 
     func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
-        DirectStreamTelemetry.record(
-            component: "direct-video",
-            event: "navigation_failed",
-            stream: Go2RTCRelayController.mainStreamName,
-            surface: surface,
-            detail: "\(currentGenerationDetail()) error=\(error.localizedDescription)"
-        )
+        guard webView === session?.webView else { return }
+        recover(reason: "navigation_failed")
     }
 
     func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
-        DirectStreamTelemetry.record(
-            component: "direct-video",
-            event: "provisional_navigation_failed",
-            stream: Go2RTCRelayController.mainStreamName,
-            surface: surface,
-            detail: "\(currentGenerationDetail()) error=\(error.localizedDescription)"
-        )
+        guard webView === session?.webView else { return }
+        recover(reason: "provisional_navigation_failed")
     }
 
-    private func startVisibleSession(reason: String) {
+    private func startSession() {
+        guard relayReady, session == nil else { return }
+        restartTask?.cancel()
+        restartTask = nil
         let generation = UUID().uuidString
         let configuration = WKWebViewConfiguration()
         configuration.allowsAirPlayForMediaPlayback = false
         configuration.mediaTypesRequiringUserActionForPlayback = []
         configuration.userContentController.add(self, name: "cambarVideoEvent")
 
-        let webView = WKWebView(frame: bounds, configuration: configuration)
+        let webView = CameraWebView(frame: parkingView.bounds, configuration: configuration)
         webView.setValue(false, forKey: "drawsBackground")
         webView.navigationDelegate = self
         webView.autoresizingMask = [.width, .height]
-        webView.translatesAutoresizingMaskIntoConstraints = true
-        webView.frame = bounds
-
         session = VideoSession(generation: generation, webView: webView)
-        hasRevealedFrame = false
-        if window == nil {
-            park(webView: webView, reason: reason)
+        phase = activeSurface.map(Phase.opening) ?? .warming
+
+        if let activeSurface, let container = containers[activeSurface]?.view {
+            attach(webView, to: container)
         } else {
-            install(webView: webView)
-            showOverlay()
+            attach(webView, to: parkingView)
+            parkingWindow.orderFront(nil)
         }
-        DirectStreamTelemetry.record(
-            component: "direct-video",
-            event: "visible_session_started",
-            stream: Go2RTCRelayController.mainStreamName,
-            surface: surface,
-            detail: "\(hostStateDetail(reason: reason)) generation=\(generation)"
-        )
+
         webView.loadHTMLString(Self.html(generation: generation), baseURL: URL(string: "http://127.0.0.1:1984/"))
+        startStartupWatchdog(generation: generation)
     }
 
-    private func parkSession(reason: String) {
+    private func attach(_ webView: WKWebView, to container: CameraVideoContainerView) {
+        container.attach(webView)
+        if container !== parkingView {
+            container.showCover(true)
+        }
+    }
+
+    private func parkSession() {
         guard let webView = session?.webView else { return }
-        park(webView: webView, reason: reason)
+        attach(webView, to: parkingView)
+        parkingWindow.orderFront(nil)
     }
 
-    private func park(webView: WKWebView, reason: String) {
-        let parkingWindow = parkingWindow ?? makeParkingWindow()
-        self.parkingWindow = parkingWindow
-        webView.removeFromSuperview()
-        webView.frame = parkingView.bounds
-        parkingView.addSubview(webView)
-        parkingWindow.orderFront(nil)
-        DirectStreamTelemetry.record(
-            component: "direct-video",
-            event: "visible_session_parked",
-            stream: Go2RTCRelayController.mainStreamName,
-            surface: surface,
-            detail: "\(currentGenerationDetail()) reason=\(reason) frame=\(Int(parkingWindow.frame.width))x\(Int(parkingWindow.frame.height))"
-        )
+    private func requestFreshOpenFrame(token: String) {
+        guard let webView = session?.webView else { return }
+        let encoded = Self.javaScriptString(token)
+        webView.evaluateJavaScript("window.__cambarMarkOpen && window.__cambarMarkOpen(\(encoded));")
+    }
+
+    private func startStartupWatchdog(generation: String) {
+        startupWatchdog?.cancel()
+        startupWatchdog = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(4))
+            guard !Task.isCancelled, let self,
+                  self.session?.generation == generation,
+                  self.session?.hasFrame != true else { return }
+            self.recover(reason: "startup_timeout")
+        }
+    }
+
+    private func startOpenWatchdog(token: String) {
+        openWatchdog?.cancel()
+        openWatchdog = Task { [weak self] in
+            try? await Task.sleep(for: .milliseconds(500))
+            guard !Task.isCancelled, let self, self.openToken == token else { return }
+            DirectStreamTelemetry.record(
+                component: "video",
+                event: "open_slow",
+                surface: self.activeSurface?.rawValue,
+                elapsedMilliseconds: 500
+            )
+            self.requestFreshOpenFrame(token: token)
+            try? await Task.sleep(for: .milliseconds(500))
+            guard !Task.isCancelled, self.openToken == token else { return }
+            self.recover(reason: "open_frame_timeout")
+        }
+    }
+
+    private func recover(reason: String) {
+        guard relayReady else { return }
+        DirectStreamTelemetry.record(component: "video", event: "recover", detail: "reason=\(reason)")
+        tearDownSession(reason: reason)
+        restartCount += 1
+        phase = .retrying
+        let delays: [TimeInterval] = [0.1, 0.5, 2, 5]
+        let delay = delays[min(restartCount - 1, delays.count - 1)]
+        restartTask?.cancel()
+        restartTask = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(delay))
+            guard !Task.isCancelled, let self, self.relayReady else { return }
+            self.startSession()
+            if let token = self.openToken {
+                self.startOpenWatchdog(token: token)
+            }
+        }
+    }
+
+    private func tearDownSession(reason: String) {
+        startupWatchdog?.cancel()
+        startupWatchdog = nil
+        openWatchdog?.cancel()
+        openWatchdog = nil
+        guard let session else { return }
+        DirectStreamTelemetry.record(component: "video", event: "session_stopped", detail: "reason=\(reason)")
+        session.webView.evaluateJavaScript(Self.stopJavaScript())
+        session.webView.stopLoading()
+        session.webView.navigationDelegate = nil
+        session.webView.configuration.userContentController.removeScriptMessageHandler(forName: "cambarVideoEvent")
+        session.webView.removeFromSuperview()
+        self.session = nil
     }
 
     private func makeParkingWindow() -> NSWindow {
-        parkingView.wantsLayer = true
-        parkingView.layer?.backgroundColor = NSColor.black.cgColor
         let window = NSWindow(
-            contentRect: NSRect(x: -20_000, y: -20_000, width: 16, height: 9),
+            contentRect: NSRect(x: -20_000, y: -20_000, width: 320, height: 180),
             styleMask: [.borderless],
             backing: .buffered,
             defer: false
@@ -347,154 +317,127 @@ final class VideoHostView: NSView, WKNavigationDelegate, WKScriptMessageHandler 
         window.alphaValue = 0.01
         window.ignoresMouseEvents = true
         window.hasShadow = false
-        window.level = .normal
         window.collectionBehavior = [.stationary, .ignoresCycle]
         window.contentView = parkingView
         return window
     }
 
-    private func install(webView: WKWebView) {
-        webView.removeFromSuperview()
-        addSubview(webView, positioned: .below, relativeTo: overlayView.superview == nil ? nil : overlayView)
-        if overlayView.superview == nil {
-            addSubview(overlayView)
-        } else {
-            overlayView.removeFromSuperview()
-            addSubview(overlayView)
-        }
-        needsLayout = true
-    }
-
-    private func showOverlay() {
-        if overlayView.superview == nil {
-            addSubview(overlayView)
-        }
-        overlayView.isHidden = false
-        overlayView.frame = bounds
-    }
-
-    private func revealVideo() {
-        hasRevealedFrame = true
-        overlayView.isHidden = true
-        DirectStreamTelemetry.record(
-            component: "direct-video",
-            event: "visible_session_revealed",
-            stream: Go2RTCRelayController.mainStreamName,
-            surface: surface,
-            detail: currentGenerationDetail()
-        )
-        guard window != nil else { return }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in
-            self?.recordWebViewSnapshot(reason: "after_reveal")
-        }
-    }
-
-    private func recordWebViewSnapshot(reason: String) {
-        guard let session else { return }
-        let generation = session.generation
+    private func recordSnapshot(surface: Surface, openElapsed: Int?) {
+        guard let webView = session?.webView else { return }
         let configuration = WKSnapshotConfiguration()
-        configuration.rect = bounds
-        session.webView.takeSnapshot(with: configuration) { image, error in
-            Task { @MainActor [weak self] in
-                guard let self else { return }
-                guard self.session?.generation == generation else {
-                    DirectStreamTelemetry.record(
-                        component: "direct-video",
-                        event: "stale_webview_snapshot_ignored",
-                        stream: Go2RTCRelayController.mainStreamName,
-                        surface: self.surface,
-                        detail: "generation=\(generation) reason=\(reason)"
-                    )
-                    return
-                }
-                if let error {
-                    DirectStreamTelemetry.record(
-                        component: "direct-video",
-                        event: "webview_snapshot_failed",
-                        stream: Go2RTCRelayController.mainStreamName,
-                        surface: self.surface,
-                        detail: "generation=\(generation) reason=\(reason) error=\(error.localizedDescription)"
-                    )
-                    return
-                }
+        configuration.rect = webView.bounds
+        webView.takeSnapshot(with: configuration) { image, _ in
+            Task { @MainActor in
                 guard let image,
                       let tiff = image.tiffRepresentation,
-                      let bitmap = NSBitmapImageRep(data: tiff) else {
-                    DirectStreamTelemetry.record(
-                        component: "direct-video",
-                        event: "webview_snapshot_failed",
-                        stream: Go2RTCRelayController.mainStreamName,
-                        surface: self.surface,
-                        detail: "generation=\(generation) reason=\(reason) error=no_image"
-                    )
-                    return
-                }
-                let sample = Self.pixelRatios(in: bitmap)
-                let openElapsed: String
-                if let lastOpenTime = self.lastOpenTime {
-                    let elapsed = Int((ProcessInfo.processInfo.systemUptime - lastOpenTime) * 1000)
-                    openElapsed = " open_elapsed_ms=\(elapsed)"
-                } else {
-                    openElapsed = ""
-                }
+                      let bitmap = NSBitmapImageRep(data: tiff) else { return }
+                let ratios = Self.pixelRatios(bitmap)
                 DirectStreamTelemetry.record(
-                    component: "direct-video",
+                    component: "video",
                     event: "webview_snapshot_sample",
-                    stream: Go2RTCRelayController.mainStreamName,
-                    surface: self.surface,
-                    detail: "generation=\(generation) reason=\(reason)\(openElapsed) white=\(String(format: "%.4f", sample.white)) dark=\(String(format: "%.4f", sample.dark)) color=\(String(format: "%.4f", sample.color)) pixels=\(sample.total)"
+                    surface: surface.rawValue,
+                    elapsedMilliseconds: openElapsed,
+                    detail: "white=\(ratios.white) dark=\(ratios.dark) color=\(ratios.color) pixels=\(ratios.total)"
                 )
             }
         }
     }
 
-    private func applyPendingClipPath() {
-        guard let svgPath = pendingClipPath,
-              let session else { return }
-        let escaped = svgPath.replacingOccurrences(of: "'", with: "\\'")
-        let js = """
-        (function() {
-          const path = '\(escaped)';
-          let style = document.getElementById('cambar-clip-style');
-          if (!style) {
-            style = document.createElement('style');
-            style.id = 'cambar-clip-style';
-            document.head.appendChild(style);
-          }
-          style.textContent = `simple-video, video { clip-path: path('${path}'); border-radius: 0 !important; }`;
-        })();
-        """
-        session.webView.evaluateJavaScript(js)
-    }
-
-    private func currentGenerationDetail() -> String {
-        if let session {
-            return "generation=\(session.generation)"
+    private static func pixelRatios(_ bitmap: NSBitmapImageRep) -> (white: Double, dark: Double, color: Double, total: Int) {
+        let step = max(1, min(bitmap.pixelsWide, bitmap.pixelsHigh) / 300)
+        var total = 0
+        var white = 0
+        var dark = 0
+        for y in stride(from: 0, to: bitmap.pixelsHigh, by: step) {
+            for x in stride(from: 0, to: bitmap.pixelsWide, by: step) {
+                guard let color = bitmap.colorAt(x: x, y: y)?.usingColorSpace(.sRGB), color.alphaComponent > 0.1 else { continue }
+                total += 1
+                if color.redComponent > 0.92, color.greenComponent > 0.92, color.blueComponent > 0.92 {
+                    white += 1
+                } else if color.redComponent < 0.05, color.greenComponent < 0.05, color.blueComponent < 0.05 {
+                    dark += 1
+                }
+            }
         }
-        return "generation=none"
+        guard total > 0 else { return (1, 0, 0, 0) }
+        return (
+            Double(white) / Double(total),
+            Double(dark) / Double(total),
+            Double(total - white - dark) / Double(total),
+            total
+        )
     }
 
-    private func hostStateDetail(reason: String) -> String {
-        let windowState: String
-        if let window {
-            windowState = "window=true visible=\(window.isVisible) key=\(window.isKeyWindow) frame=\(Int(window.frame.width))x\(Int(window.frame.height))"
-        } else {
-            windowState = "window=false"
-        }
-        return "reason=\(reason) \(windowState) bounds=\(Int(bounds.width))x\(Int(bounds.height)) autoStart=\(autoStart)"
-    }
-
-    private static func jsString(_ value: String) -> String {
+    private static func javaScriptString(_ value: String) -> String {
         guard let data = try? JSONSerialization.data(withJSONObject: [value]),
-              let encoded = String(data: data, encoding: .utf8),
-              encoded.count >= 2 else {
-            return "''"
-        }
+              let encoded = String(data: data, encoding: .utf8) else { return "''" }
         return String(encoded.dropFirst().dropLast())
     }
 
-    private struct VideoSession {
+    private final class VideoSession {
         let generation: String
         let webView: WKWebView
+        var hasFrame = false
+
+        init(generation: String, webView: WKWebView) {
+            self.generation = generation
+            self.webView = webView
+        }
+    }
+}
+
+private final class CameraWebView: WKWebView {
+    override func menu(for event: NSEvent) -> NSMenu? {
+        nil
+    }
+}
+
+@MainActor
+final class CameraVideoContainerView: NSView {
+    private let cover = NSView()
+
+    init(cornerRadius: CGFloat) {
+        super.init(frame: .zero)
+        wantsLayer = true
+        layer?.backgroundColor = NSColor.black.cgColor
+        layer?.cornerRadius = cornerRadius
+        layer?.masksToBounds = true
+        cover.wantsLayer = true
+        cover.layer?.backgroundColor = NSColor.black.cgColor
+        addSubview(cover)
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { nil }
+
+    override var isFlipped: Bool { true }
+
+    override func layout() {
+        super.layout()
+        subviews.first { $0 is WKWebView }?.frame = bounds
+        cover.frame = bounds
+    }
+
+    func setCornerRadius(_ radius: CGFloat) {
+        layer?.cornerRadius = radius
+    }
+
+    func attach(_ webView: WKWebView) {
+        webView.removeFromSuperview()
+        addSubview(webView, positioned: .below, relativeTo: cover)
+        webView.frame = bounds
+        needsLayout = true
+    }
+
+    func showCover(_ show: Bool) {
+        cover.isHidden = !show
+    }
+}
+
+private final class WeakVideoContainer {
+    weak var view: CameraVideoContainerView?
+
+    init(_ view: CameraVideoContainerView) {
+        self.view = view
     }
 }

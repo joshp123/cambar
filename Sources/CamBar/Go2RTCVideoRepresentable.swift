@@ -1,55 +1,37 @@
 import SwiftUI
 
-struct Go2RTCVideoView: NSViewRepresentable {
-    let surface: String
-    let autoStart: Bool
+struct CameraVideoView: NSViewRepresentable {
+    let playback: CameraPlaybackController
+    let surface: CameraPlaybackController.Surface
+    let cornerRadius: CGFloat
 
-    init(surface: String, autoStart: Bool = true) {
-        self.surface = surface
-        self.autoStart = autoStart
+    func makeCoordinator() -> Coordinator {
+        Coordinator(playback: playback, surface: surface)
+    }
+
+    func makeNSView(context: Context) -> CameraVideoContainerView {
+        let container = CameraVideoContainerView(cornerRadius: cornerRadius)
+        playback.register(container, for: surface)
+        return container
+    }
+
+    func updateNSView(_ nsView: CameraVideoContainerView, context: Context) {
+        nsView.setCornerRadius(cornerRadius)
+        playback.register(nsView, for: surface)
+    }
+
+    static func dismantleNSView(_ nsView: CameraVideoContainerView, coordinator: Coordinator) {
+        coordinator.playback.unregister(nsView, for: coordinator.surface)
     }
 
     @MainActor
-    static func start(surface: String) {
-        VideoHostRegistry.shared.start(surface: surface)
-    }
+    final class Coordinator {
+        let playback: CameraPlaybackController
+        let surface: CameraPlaybackController.Surface
 
-    @MainActor
-    static func warm(surface: String, size: CGSize) {
-        VideoHostRegistry.shared.warm(surface: surface, size: size)
-    }
-
-    @MainActor
-    static func markOpen(surface: String) {
-        VideoHostRegistry.shared.markOpen(surface: surface)
-    }
-
-    @MainActor
-    static func stop(surface: String, reason: String) {
-        VideoHostRegistry.shared.stop(surface: surface, reason: reason)
-    }
-
-    @MainActor
-    static func applyClipPath(surface: String, svgPath: String) {
-        VideoHostRegistry.shared.applyClipPath(surface: surface, svgPath: svgPath)
-    }
-
-    @MainActor
-    static func probe(surface: String, reason: String) {
-        VideoHostRegistry.shared.probe(surface: surface, reason: reason)
-    }
-
-    func makeNSView(context: Context) -> VideoHostView {
-        let hostView = VideoHostView(surface: surface, autoStart: autoStart)
-        VideoHostRegistry.shared.register(hostView)
-        return hostView
-    }
-
-    func updateNSView(_ nsView: VideoHostView, context: Context) {
-        nsView.autoStart = autoStart
-        VideoHostRegistry.shared.register(nsView)
-        if autoStart {
-            nsView.startIfVisible()
+        init(playback: CameraPlaybackController, surface: CameraPlaybackController.Surface) {
+            self.playback = playback
+            self.surface = surface
         }
     }
 }

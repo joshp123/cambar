@@ -14,20 +14,21 @@ struct ContentView: View {
     static let videoBorderWidth: CGFloat = 2
 
     @ObservedObject var state: CamBarUIState
+    let playback: CameraPlaybackController
     let onOpenWindow: () -> Void
+    let onRetry: () -> Void
 
     var body: some View {
         ZStack(alignment: .bottomTrailing) {
             Color.white
 
-            if state.relayAvailable {
-                Go2RTCVideoView(surface: "menu")
-                    .frame(width: state.videoSize.width, height: state.videoSize.height)
-                    .padding(Self.videoBorderWidth)
-            } else {
-                Text("Camera unavailable")
-                    .font(.callout.weight(.semibold))
-                    .foregroundColor(.black)
+            CameraVideoView(playback: playback, surface: .menu, cornerRadius: 0)
+                .frame(width: state.videoSize.width, height: state.videoSize.height)
+                .padding(Self.videoBorderWidth)
+
+            if !state.relayAvailable {
+                Button("Camera unavailable — retry", action: onRetry)
+                    .buttonStyle(.borderedProminent)
             }
 
             Button {
