@@ -845,6 +845,9 @@ private func run() throws {
 
     let driver = StatusItemDriver(processIdentifier: application.processIdentifier)
     _ = try driver.waitForFrame(timeout: 10)
+    // AX exposes a newly inserted status item before the menu-bar host will
+    // reliably dispatch AXPress. Keep this independent of stream readiness.
+    RunLoop.current.run(until: Date().addingTimeInterval(0.4))
     try driver.clickStatusItem()
     _ = try telemetry.waitForEvent(
         "status_click",
