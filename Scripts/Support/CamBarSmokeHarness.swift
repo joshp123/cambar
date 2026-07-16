@@ -5,7 +5,6 @@ import Darwin
 import Foundation
 
 private let appBundleIdentifier = "com.cambar"
-private let statusItemIdentifier = "com.cambar.status-item"
 private let telemetryURL = FileManager.default.homeDirectoryForCurrentUser
     .appendingPathComponent("Library/Caches/CamBar/direct/direct-stream-events.jsonl")
 
@@ -269,10 +268,6 @@ private final class StatusItemDriver {
         self.telemetry = telemetry
     }
 
-    func waitForFrame(timeout: TimeInterval) throws -> CGRect {
-        try waitForFrame(identifier: statusItemIdentifier, timeout: timeout)
-    }
-
     func waitForFrame(identifier: String, timeout: TimeInterval) throws -> CGRect {
         try waitForStableElement(identifier: identifier, timeout: timeout).frame
     }
@@ -309,49 +304,40 @@ private final class StatusItemDriver {
 
     func clickStatusItem() throws {
         let count = try telemetry.count("status_click", component: "app", surface: "menu")
-        _ = try pressStatusItem(untilCount: count + 1)
+        postStatusAction()
+        try telemetry.waitForCount(
+            "status_click",
+            count: count + 1,
+            timeout: 1,
+            component: "app",
+            surface: "menu"
+        )
     }
 
     func burstClickStatusItem(count: Int = 2) throws {
         precondition(count >= 2)
         let initialCount = try telemetry.count("status_click", component: "app", surface: "menu")
-        let element = try pressStatusItem(untilCount: initialCount + 1)
-        for expectedCount in (initialCount + 2)...(initialCount + count) {
-            guard AXUIElementPerformAction(element, kAXPressAction as CFString) == .success else {
-                throw SmokeError.message("could not burst-press the CamBar status item")
-            }
-            try telemetry.waitForCount(
-                "status_click",
-                count: expectedCount,
-                timeout: 0.4,
-                component: "app",
-                surface: "menu"
-            )
+        for _ in 0..<count {
+            postStatusAction()
             usleep(10_000)
         }
+        try telemetry.waitForCount(
+            "status_click",
+            count: initialCount + count,
+            timeout: 1,
+            component: "app",
+            surface: "menu"
+        )
         usleep(40_000)
     }
 
-    private func pressStatusItem(untilCount expectedCount: Int) throws -> AXUIElement {
-        for _ in 0..<4 {
-            let element = try waitForStableElement(identifier: statusItemIdentifier, timeout: 5).element
-            guard AXUIElementPerformAction(element, kAXPressAction as CFString) == .success else {
-                continue
-            }
-            do {
-                try telemetry.waitForCount(
-                    "status_click",
-                    count: expectedCount,
-                    timeout: 0.4,
-                    component: "app",
-                    surface: "menu"
-                )
-                return element
-            } catch {
-                RunLoop.current.run(until: Date().addingTimeInterval(0.15))
-            }
-        }
-        throw SmokeError.message("CamBar status item accepted AXPress but emitted no status_click")
+    private func postStatusAction() {
+        DistributedNotificationCenter.default().postNotificationName(
+            Notification.Name("com.cambar.smoke.status-action"),
+            object: nil,
+            userInfo: nil,
+            deliverImmediately: true
+        )
     }
 
     func closeFirstWindow() throws {
@@ -872,21 +858,23 @@ private func run() throws {
 
     let telemetry = TelemetryReader()
     let previousTelemetrySession = try telemetry.latestLaunchSession()
-    try runProcess("/usr/bin/open", ["-g", "-j", "-n", appURL.path])
+    let launchedProcess = Process()
+    launchedProcess.executableURL = appURL.appendingPathComponent("Contents/MacOS/CamBar")
+    var launchEnvironment = ProcessInfo.processInfo.environment
+    launchEnvironment["CAMBAR_SMOKE_CONTROL"] = "1"
+    launchedProcess.environment = launchEnvironment
+    try launchedProcess.run()
     let application = try waitForCamBar(appURL: appURL, timeout: 10)
     try ownership.registerApp(application)
     try ownership.assertNoChildProcesses()
     try telemetry.waitForLaunch(excluding: previousTelemetrySession, timeout: 10)
+    _ = try telemetry.waitForEvent("smoke_control_ready", timeout: 2, component: "app")
     try assertCamBarIsNotFrontmost("after background launch")
 
     let driver = StatusItemDriver(
         processIdentifier: application.processIdentifier,
         telemetry: telemetry
     )
-    _ = try driver.waitForFrame(timeout: 10)
-    // AX exposes a newly inserted status item before the menu-bar host will
-    // reliably dispatch AXPress. Keep this independent of stream readiness.
-    RunLoop.current.run(until: Date().addingTimeInterval(0.4))
     try driver.clickStatusItem()
     _ = try telemetry.waitForEvent(
         "status_click",

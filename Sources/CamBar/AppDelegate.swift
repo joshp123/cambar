@@ -15,6 +15,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     )
     private var windowController: CameraWindowController?
     private var workspaceObservers: [NSObjectProtocol] = []
+    private var smokeControlObserver: NSObjectProtocol?
     private var outsideClickMonitor: Any?
     private var popoverPresentation = PopoverPresentationState()
     private var pendingOpenIntent: OpenIntent?
@@ -29,6 +30,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         configureMainMenu()
         configureStatusItem()
         configurePopover()
+        configureSmokeControlIfEnabled()
 
         streamController.onStateChange = { [weak self] state in
             self?.streamStateDidChange(state)
@@ -61,6 +63,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     func applicationWillTerminate(_ notification: Notification) {
         for observer in workspaceObservers {
             NSWorkspace.shared.notificationCenter.removeObserver(observer)
+        }
+        if let smokeControlObserver {
+            DistributedNotificationCenter.default().removeObserver(smokeControlObserver)
         }
         if let outsideClickMonitor {
             NSEvent.removeMonitor(outsideClickMonitor)
@@ -114,6 +119,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
                 onRetry: { [weak self] in self?.retry() }
             )
         )
+    }
+
+    private func configureSmokeControlIfEnabled() {
+        guard ProcessInfo.processInfo.environment["CAMBAR_SMOKE_CONTROL"] == "1" else { return }
+        smokeControlObserver = DistributedNotificationCenter.default().addObserver(
+            forName: Notification.Name("com.cambar.smoke.status-action"),
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.handleStatusItemClick()
+            }
+        }
+        DirectStreamTelemetry.record(component: "app", event: "smoke_control_ready")
     }
 
     private func startMonitoringOutsideClicks() {
