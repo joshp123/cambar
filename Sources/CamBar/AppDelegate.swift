@@ -133,11 +133,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
                 }
             )
         }
+        NSApp.activate(ignoringOtherApps: true)
+        windowController?.present()
         if popover.isShown {
             popover.performClose(nil)
         }
-        NSApp.activate(ignoringOtherApps: true)
-        windowController?.present()
     }
 
     private func bestPopoverVideoSize(anchorButton: NSStatusBarButton?) -> NSSize {
@@ -145,8 +145,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         let visible = screen?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1280, height: 720)
         let maxWidth = max(320, visible.width - 80 - ContentView.contentInset * 2)
         let maxHeight = max(180, visible.height - 120 - ContentView.contentInset * 2)
-        let preferredWidth = min(1_080, visible.width * 0.55)
-        let scale = min(1, preferredWidth / nativeVideoSize.width, maxWidth / nativeVideoSize.width, maxHeight / nativeVideoSize.height)
+        let scale = min(1, maxWidth / nativeVideoSize.width, maxHeight / nativeVideoSize.height)
         return NSSize(
             width: floor(nativeVideoSize.width * scale),
             height: floor(nativeVideoSize.height * scale)
