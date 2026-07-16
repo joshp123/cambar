@@ -37,18 +37,16 @@ fi
 "$ROOT/Scripts/verify_release_safety.sh"
 
 if [[ -e "$APP" ]]; then
-  for relative_path in "" "/Contents/Resources/bin/go2rtc"; do
-    CURRENT_REQUIREMENT=$(codesign -dr - "$APP$relative_path" 2>&1 | sed -n 's/^designated => //p')
-    STAGED_REQUIREMENT=$(codesign -dr - "$BUILT_APP$relative_path" 2>&1 | sed -n 's/^designated => //p')
-    if [[ -z "$CURRENT_REQUIREMENT" || -z "$STAGED_REQUIREMENT" ]]; then
-      echo "ERROR: could not read signing requirement for ${relative_path:-main app}." >&2
-      exit 1
-    fi
-    if [[ "$CURRENT_REQUIREMENT" != "$STAGED_REQUIREMENT" ]]; then
-      echo "ERROR: signing requirement changed for ${relative_path:-main app}; refusing deployment." >&2
-      exit 1
-    fi
-  done
+  CURRENT_REQUIREMENT=$(codesign -dr - "$APP" 2>&1 | sed -n 's/^designated => //p')
+  STAGED_REQUIREMENT=$(codesign -dr - "$BUILT_APP" 2>&1 | sed -n 's/^designated => //p')
+  if [[ -z "$CURRENT_REQUIREMENT" || -z "$STAGED_REQUIREMENT" ]]; then
+    echo "ERROR: could not read app signing requirement." >&2
+    exit 1
+  fi
+  if [[ "$CURRENT_REQUIREMENT" != "$STAGED_REQUIREMENT" ]]; then
+    echo "ERROR: app signing requirement changed; refusing deployment." >&2
+    exit 1
+  fi
 fi
 
 mkdir -p "$HOME/Applications" "$ROLLBACK_DIR"

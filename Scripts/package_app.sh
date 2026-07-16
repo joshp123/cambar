@@ -21,16 +21,6 @@ if [[ "$ARCH" == *" "* ]]; then
   exit 1
 fi
 
-GO2RTC_SOURCE=$(command -v go2rtc || true)
-if [[ ! -x "$GO2RTC_SOURCE" ]]; then
-  echo "ERROR: go2rtc not found on PATH. Enter the devenv shell first." >&2
-  exit 1
-fi
-if [[ " $(lipo -archs "$GO2RTC_SOURCE") " != *" $ARCH "* ]]; then
-  echo "ERROR: go2rtc does not contain required architecture $ARCH." >&2
-  exit 1
-fi
-
 swift build -c "$CONF" --arch "$ARCH"
 PRODUCT_DIR=$(swift build -c "$CONF" --arch "$ARCH" --show-bin-path)
 PRODUCT="$PRODUCT_DIR/$APP_NAME"
@@ -54,11 +44,10 @@ fi
 if [[ -e "$STAGED_APP" ]]; then
   trash "$STAGED_APP"
 fi
-mkdir -p "$STAGED_APP/Contents/MacOS" "$STAGED_APP/Contents/Resources/bin"
+mkdir -p "$STAGED_APP/Contents/MacOS"
 cp "$PRODUCT" "$STAGED_APP/Contents/MacOS/$APP_NAME"
-cp "$GO2RTC_SOURCE" "$STAGED_APP/Contents/Resources/bin/go2rtc"
 chmod -R u+w "$STAGED_APP"
-chmod +x "$STAGED_APP/Contents/MacOS/$APP_NAME" "$STAGED_APP/Contents/Resources/bin/go2rtc"
+chmod +x "$STAGED_APP/Contents/MacOS/$APP_NAME"
 
 BUILD_TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 GIT_COMMIT=$(git rev-parse --short HEAD 2>/dev/null || echo "unknown")
@@ -99,7 +88,6 @@ if [[ -z "$APP_IDENTITY" ]]; then
   exit 1
 fi
 SIGN_ARGS=(--force --options runtime --sign "$APP_IDENTITY")
-codesign "${SIGN_ARGS[@]}" "$STAGED_APP/Contents/Resources/bin/go2rtc"
 codesign "${SIGN_ARGS[@]}" "$STAGED_APP"
 codesign --verify --deep --strict "$STAGED_APP"
 STAGED_TEAM_ID=$(codesign -dv --verbose=4 "$STAGED_APP" 2>&1 | awk -F= '/^TeamIdentifier=/ { print $2; exit }')

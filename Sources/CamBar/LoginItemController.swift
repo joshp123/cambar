@@ -4,8 +4,6 @@ import ServiceManagement
 
 @MainActor
 final class LoginItemController {
-    private let attemptedRegistrationKey = "didAttemptLoginItemRegistration"
-
     func ensureRegistered() {
         let canonicalURL = FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent("Applications/CamBar.app")
@@ -25,12 +23,7 @@ final class LoginItemController {
             DirectStreamTelemetry.record(component: "login_item", event: "enabled")
             return
         case .notRegistered, .notFound:
-            guard !UserDefaults.standard.bool(forKey: attemptedRegistrationKey) else {
-                DirectStreamTelemetry.record(component: "login_item", event: "not_registered")
-                return
-            }
-            UserDefaults.standard.set(true, forKey: attemptedRegistrationKey)
-            DirectStreamTelemetry.record(component: "login_item", event: "registering_once")
+            DirectStreamTelemetry.record(component: "login_item", event: "registering")
             register(service)
         case .requiresApproval:
             DirectStreamTelemetry.record(component: "login_item", event: "requires_approval")

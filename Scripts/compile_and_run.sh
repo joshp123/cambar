@@ -21,8 +21,6 @@ for arg in "$@"; do
   esac
 done
 
-command -v go2rtc >/dev/null 2>&1 || fail "go2rtc not found on PATH; enter the devenv shell."
-
 if [[ "${RUN_TESTS}" == "1" ]]; then
   log "==> swift test"
   swift test -q

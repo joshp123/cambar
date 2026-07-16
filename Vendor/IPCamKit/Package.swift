@@ -1,0 +1,31 @@
+// swift-tools-version: 6.0
+
+import PackageDescription
+
+let package = Package(
+  name: "IPCamKit",
+  platforms: [
+    .macOS(.v13),
+    .iOS(.v16),
+    .tvOS(.v16),
+    .macCatalyst(.v16),
+    .visionOS(.v1),
+  ],
+  products: [
+    .library(
+      name: "IPCamKit",
+      targets: ["IPCamKit"]
+    )
+  ],
+  targets: [
+    .target(
+      name: "IPCamKit",
+      path: "Sources/IPCamKit"
+    ),
+    .testTarget(
+      name: "IPCamKitTests",
+      dependencies: ["IPCamKit"],
+      path: "Tests/IPCamKitTests"
+    )
+  ]
+)

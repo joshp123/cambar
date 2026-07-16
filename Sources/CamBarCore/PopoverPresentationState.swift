@@ -102,7 +102,12 @@ public struct PopoverPresentationState: Equatable, Sendable {
         case (.open, false):
             phase = .closing
             return .close
-        case (.opening, _), (.closing, _), (.closed, false), (.open, true):
+        case (.opening, false):
+            // AppKit can ignore close() before an in-flight popover has
+            // actually presented and then send neither delegate callback.
+            // didShow (or the presentation timeout) reconciles this intent.
+            return .none
+        case (.opening, true), (.closing, _), (.closed, false), (.open, true):
             return .none
         }
     }

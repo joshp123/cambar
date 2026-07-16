@@ -24,13 +24,20 @@ POPOVER_SHOWS=$(rg -n 'popover\.show\(' Sources/CamBar/AppDelegate.swift | wc -l
 WINDOW_FRONTS=$(rg -n 'makeKeyAndOrderFront\(' Sources/CamBar | wc -l | tr -d ' ')
 [[ "$WINDOW_FRONTS" == "1" ]] || fail "release source must contain one explicit window-front call"
 
-if rg -n 'parkingWindow|parkingView|alphaValue\s*=\s*0\.0?1' Sources; then
-  fail "release source contains an offscreen WebKit parking path"
+if rg -n 'import WebKit|WKWebView|go2rtc|Go2RTC|ffmpeg|NWListener|AVPlayer' Sources; then
+  fail "release source contains an obsolete playback pipeline"
 fi
 
-if rg -n 'startupWatchdog|startup_timeout' Sources; then
-  fail "release source contains a hidden-surface startup watchdog"
-fi
+RTSP_SESSIONS=$(rg -n 'RTSPClientSession\(' Sources/CamBar | wc -l | tr -d ' ')
+[[ "$RTSP_SESSIONS" == "1" ]] || fail "release source must own exactly one RTSP session construction site"
+DECODER_SESSIONS=$(rg -n 'VTDecompressionSessionCreate\(' Sources/CamBar | wc -l | tr -d ' ')
+[[ "$DECODER_SESSIONS" == "1" ]] || fail "release source must own exactly one hardware decoder construction site"
+rg -q 'public func abort\(\) async' Vendor/IPCamKit/Sources/IPCamKit/Client/RTSPSession.swift \
+  || fail "vendored RTSP client is missing immediate fault-path abort"
+rg -q 'await activeSession\?\.abort\(\)' Sources/CamBar/CameraStreamController.swift \
+  || fail "stream recovery is not using immediate RTSP abort"
+[[ ! -d .build/package/CamBar.app/Contents/Resources/bin ]] \
+  || fail "staged app contains an obsolete helper directory"
 
 swift test -q
 echo "Release source safety checks passed."

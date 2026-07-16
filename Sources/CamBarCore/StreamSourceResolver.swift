@@ -29,14 +29,6 @@ public enum StreamSourceResolver {
         }
     }
 
-    public static func bundledGo2RTCPath() -> String? {
-        guard let path = Bundle.main.resourceURL?
-            .appendingPathComponent("bin/go2rtc")
-            .path,
-              FileManager.default.isExecutableFile(atPath: path) else { return nil }
-        return path
-    }
-
     public static func defaultConfigURL() -> URL {
         URL(fileURLWithPath: (NSHomeDirectory() as NSString).appendingPathComponent(".config/camsnap/config.yaml"))
     }

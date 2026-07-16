@@ -7,18 +7,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     private let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
     private let popover = NSPopover()
     private let loginItemController = LoginItemController()
-    private let relayController = Go2RTCRelayController()
-    private let playbackController = CameraPlaybackController(
+    private lazy var streamController = CameraStreamController(sourceURL: resolvedRTSPURL() ?? "")
+    private lazy var playbackController = CameraPlaybackController(
+        stream: streamController,
         surface: .menu,
         cornerStyle: .containerConcentric
     )
     private var windowController: CameraWindowController?
-    private var wakeObserver: NSObjectProtocol?
+    private var workspaceObservers: [NSObjectProtocol] = []
     private var outsideClickMonitor: Any?
     private var popoverPresentation = PopoverPresentationState()
-    private var relayAvailable = false
-    private var relayReady = false
-    private let nativeVideoSize = CGSize(width: 2688, height: 1520)
+    private var pendingOpenIntent: OpenIntent?
+    private var activeOpenIntent: OpenIntent?
+    private var nativeVideoSize = CGSize(width: 2688, height: 1520)
     private lazy var uiState = CamBarUIState(videoSize: bestPopoverVideoSize(anchorButton: statusItem.button))
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -29,32 +30,44 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         configureStatusItem()
         configurePopover()
 
-        relayController.onStateChange = { [weak self] state in
-            self?.relayStateDidChange(state)
+        streamController.onStateChange = { [weak self] state in
+            self?.streamStateDidChange(state)
         }
-        relayController.start()
+        streamController.onVideoSizeChange = { [weak self] size in
+            self?.nativeVideoSize = size
+        }
+        streamController.start()
 
-        wakeObserver = NSWorkspace.shared.notificationCenter.addObserver(
+        workspaceObservers.append(NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.willSleepNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.streamController.suspendForSleep()
+            }
+        })
+        workspaceObservers.append(NSWorkspace.shared.notificationCenter.addObserver(
             forName: NSWorkspace.didWakeNotification,
             object: nil,
             queue: .main
         ) { [weak self] _ in
             Task { @MainActor [weak self] in
-                self?.relayController.restart()
+                self?.streamController.resumeAfterWake()
             }
-        }
+        })
     }
 
     func applicationWillTerminate(_ notification: Notification) {
-        if let wakeObserver {
-            NSWorkspace.shared.notificationCenter.removeObserver(wakeObserver)
+        for observer in workspaceObservers {
+            NSWorkspace.shared.notificationCenter.removeObserver(observer)
         }
         if let outsideClickMonitor {
             NSEvent.removeMonitor(outsideClickMonitor)
         }
         windowController?.shutdown()
         playbackController.shutdown()
-        relayController.stop()
+        streamController.shutdown()
         DirectStreamTelemetry.flush()
     }
 
@@ -153,29 +166,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         self.outsideClickMonitor = nil
     }
 
-    private func relayStateDidChange(_ state: Go2RTCRelayController.State) {
+    private func streamStateDidChange(_ state: CameraStreamController.State) {
         switch state {
         case .ready:
             uiState.status = .ready
-        case .waitingToRetry, .stopped:
+        case .waitingToRetry, .stopped, .suspended:
             uiState.status = .unavailable
-        case .starting, .warming:
+        case .connecting:
             uiState.status = .connecting
         }
-        relayAvailable = switch state {
-        case .warming, .ready: true
-        case .starting, .waitingToRetry, .stopped: false
-        }
-        relayReady = state == .ready
-        playbackController.setRelayState(available: relayAvailable, ready: relayReady)
-        windowController?.setRelayState(available: relayAvailable, ready: relayReady)
     }
 
     private func retry() {
         playbackController.retryNow()
-        if relayController.state != .ready {
-            relayController.restart()
-        }
     }
 
     @objc private func handleStatusItemClick() {
@@ -186,14 +189,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
             showStatusMenu(for: event)
             return
         }
-        let command = popoverPresentation.toggle(
-            at: event?.timestamp ?? ProcessInfo.processInfo.systemUptime
-        )
+        let clickAt = event?.timestamp ?? ProcessInfo.processInfo.systemUptime
+        let wantedVisibleBeforeClick = popoverPresentation.wantsVisible
+        let command = popoverPresentation.toggle(at: clickAt)
+        if !wantedVisibleBeforeClick, popoverPresentation.wantsVisible {
+            pendingOpenIntent = OpenIntent(id: UUID().uuidString, startedAt: clickAt)
+        }
+        let openIntent = pendingOpenIntent ?? activeOpenIntent
         DirectStreamTelemetry.record(
             component: "app",
             event: "status_click",
             surface: "menu",
-            detail: "desired=\(popoverPresentation.wantsVisible) state=\(popoverPresentation.phase)"
+            openID: openIntent?.id,
+            detail: "command=\(command) desired=\(popoverPresentation.wantsVisible) state=\(popoverPresentation.phase)"
         )
         apply(command)
     }
@@ -220,6 +228,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
             component: "app",
             event: "menu_close_requested",
             surface: "menu",
+            openID: activeOpenIntent?.id ?? pendingOpenIntent?.id,
             detail: "reason=\(reason) state=\(popoverPresentation.phase)"
         )
         apply(command)
@@ -247,7 +256,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         let size = bestPopoverVideoSize(anchorButton: button)
         uiState.videoSize = size
         popover.contentSize = ContentView.contentSize(forVideoSize: size)
-        DirectStreamTelemetry.record(component: "app", event: "menu_open_requested", surface: "menu")
+        if pendingOpenIntent == nil {
+            pendingOpenIntent = OpenIntent(
+                id: UUID().uuidString,
+                startedAt: ProcessInfo.processInfo.systemUptime
+            )
+        }
+        let openIntent = pendingOpenIntent
+        DirectStreamTelemetry.record(
+            component: "app",
+            event: "menu_open_requested",
+            surface: "menu",
+            openID: openIntent?.id,
+            detail: "presentation_id=\(popoverPresentation.presentationID)"
+        )
         let presentationID = popoverPresentation.presentationID
         startMonitoringOutsideClicks()
         popover.show(relativeTo: button.bounds, of: button, preferredEdge: .maxY)
@@ -256,11 +278,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
                   self.popoverPresentation.presentationID == presentationID,
                   self.popoverPresentation.phase == .opening else { return }
             if self.popover.isShown {
-                DirectStreamTelemetry.record(component: "app", event: "menu_show_confirmed", surface: "menu")
+                DirectStreamTelemetry.record(
+                    component: "app",
+                    event: "menu_show_confirmed",
+                    surface: "menu",
+                    openID: self.pendingOpenIntent?.id ?? self.activeOpenIntent?.id
+                )
                 self.confirmPopoverShown()
             } else {
-                DirectStreamTelemetry.record(component: "app", event: "menu_show_failed", surface: "menu")
+                DirectStreamTelemetry.record(
+                    component: "app",
+                    event: "menu_show_failed",
+                    surface: "menu",
+                    openID: self.pendingOpenIntent?.id
+                )
                 self.popoverPresentation.presentationFailed()
+                self.pendingOpenIntent = nil
                 self.stopMonitoringOutsideClicks()
             }
         }
@@ -271,9 +304,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         playbackController.suspend()
         if windowController == nil {
             windowController = CameraWindowController(
+                stream: streamController,
                 nativeVideoSize: nativeVideoSize,
-                relayAvailable: relayAvailable,
-                relayReady: relayReady,
                 onClose: { [weak self] in
                     self?.playbackController.resumeAfterPopout()
                     self?.windowController = nil
@@ -298,11 +330,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     }
 
     func popoverWillShow(_ notification: Notification) {
-        DirectStreamTelemetry.record(component: "app", event: "menu_will_show", surface: "menu")
+        DirectStreamTelemetry.record(
+            component: "app",
+            event: "menu_will_show",
+            surface: "menu",
+            openID: pendingOpenIntent?.id
+        )
     }
 
     func popoverDidShow(_ notification: Notification) {
-        DirectStreamTelemetry.record(component: "app", event: "menu_did_show", surface: "menu")
+        DirectStreamTelemetry.record(
+            component: "app",
+            event: "menu_did_show",
+            surface: "menu",
+            openID: pendingOpenIntent?.id
+        )
         confirmPopoverShown()
     }
 
@@ -312,20 +354,53 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         let command = popoverPresentation.didShow()
         if shouldStartPlayback,
            popoverPresentation.phase == .open,
-           popoverPresentation.wantsVisible {
-            playbackController.show()
+           popoverPresentation.wantsVisible,
+           let intent = pendingOpenIntent {
+            activeOpenIntent = intent
+            pendingOpenIntent = nil
+            playbackController.show(openID: intent.id, startedAt: intent.startedAt)
         }
         apply(command)
     }
 
     func popoverWillClose(_ notification: Notification) {
-        DirectStreamTelemetry.record(component: "app", event: "menu_will_close", surface: "menu")
+        DirectStreamTelemetry.record(
+            component: "app",
+            event: "menu_will_close",
+            surface: "menu",
+            openID: activeOpenIntent?.id ?? pendingOpenIntent?.id
+        )
     }
 
     func popoverDidClose(_ notification: Notification) {
-        DirectStreamTelemetry.record(component: "app", event: "menu_closed", surface: "menu")
+        DirectStreamTelemetry.record(
+            component: "app",
+            event: "menu_closed",
+            surface: "menu",
+            openID: activeOpenIntent?.id ?? pendingOpenIntent?.id
+        )
         stopMonitoringOutsideClicks()
         playbackController.hide()
-        apply(popoverPresentation.didClose())
+        activeOpenIntent = nil
+        let command = popoverPresentation.didClose()
+        if !popoverPresentation.wantsVisible {
+            pendingOpenIntent = nil
+        }
+        apply(command)
+    }
+
+    private struct OpenIntent {
+        let id: String
+        let startedAt: TimeInterval
+    }
+
+    private func resolvedRTSPURL() -> String? {
+        if let override = StreamSourceResolver.loadRtspOverride() {
+            return override
+        }
+        guard let config = StreamSourceResolver.loadCameraConfig(
+            from: StreamSourceResolver.defaultConfigURL()
+        ) else { return nil }
+        return StreamSourceResolver.buildRtspURL(from: config)
     }
 }

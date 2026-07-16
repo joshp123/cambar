@@ -1,4 +1,5 @@
 import AppKit
+import CamBarCore
 import SwiftUI
 
 @MainActor
@@ -8,12 +9,15 @@ final class CameraWindowController: NSWindowController, NSWindowDelegate {
     private var isPresentingCamera = false
 
     init(
+        stream: CameraStreamController,
         nativeVideoSize: CGSize,
-        relayAvailable: Bool,
-        relayReady: Bool,
         onClose: @escaping () -> Void = {}
     ) {
-        let playback = CameraPlaybackController(surface: .window, cornerStyle: .square)
+        let playback = CameraPlaybackController(
+            stream: stream,
+            surface: .window,
+            cornerStyle: .square
+        )
         self.playback = playback
         self.onClose = onClose
         let hosting = NSHostingController(rootView: CameraWindowView(playback: playback))
@@ -28,7 +32,6 @@ final class CameraWindowController: NSWindowController, NSWindowDelegate {
         window.isReleasedWhenClosed = false
         super.init(window: window)
         window.delegate = self
-        playback.setRelayState(available: relayAvailable, ready: relayReady)
     }
 
     @available(*, unavailable)
@@ -42,15 +45,12 @@ final class CameraWindowController: NSWindowController, NSWindowDelegate {
         setCameraVisible(true)
     }
 
-    func setRelayState(available: Bool, ready: Bool) {
-        playback.setRelayState(available: available, ready: ready)
-    }
-
     func shutdown() {
         playback.shutdown()
     }
 
     func windowWillClose(_ notification: Notification) {
+        DirectStreamTelemetry.record(component: "app", event: "window_closed", surface: "window")
         setCameraVisible(false)
         playback.shutdown()
         onClose()
@@ -77,7 +77,10 @@ final class CameraWindowController: NSWindowController, NSWindowDelegate {
         guard visible != isPresentingCamera else { return }
         isPresentingCamera = visible
         if visible {
-            playback.show()
+            playback.show(
+                openID: UUID().uuidString,
+                startedAt: ProcessInfo.processInfo.systemUptime
+            )
         } else {
             playback.suspend()
         }

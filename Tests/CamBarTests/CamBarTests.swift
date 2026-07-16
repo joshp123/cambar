@@ -67,6 +67,7 @@ final class CamBarTests: XCTestCase {
 
         XCTAssertEqual(state.toggle(at: 1), .show)
         XCTAssertEqual(state.requestClose(at: 2), .none)
+        XCTAssertEqual(state.phase, .opening)
         XCTAssertEqual(state.didShow(), .close)
         XCTAssertEqual(state.didClose(), .none)
         XCTAssertEqual(state.phase, .closed)
@@ -90,6 +91,7 @@ final class CamBarTests: XCTestCase {
         XCTAssertEqual(state.requestOpen(at: 1), .show)
         let firstPresentation = state.presentationID
         XCTAssertEqual(state.requestClose(at: 2), .none)
+        XCTAssertEqual(state.didShow(), .close)
         XCTAssertEqual(state.didClose(), .none)
         XCTAssertEqual(state.requestOpen(at: 3), .show)
 
@@ -302,63 +304,65 @@ final class CamBarTests: XCTestCase {
         XCTAssertNil(StreamSourceResolver.loadCameraConfig(from: tempURL))
     }
 
-    func testRelayStartupRequiresCurrentVideoFlow() throws {
-        let first = try XCTUnwrap(RelayStreamSample.decode(Data(#"{"producers":[{"medias":["video, recvonly, H264"],"bytes_recv":400000}]}"#.utf8)))
-        let advancing = try XCTUnwrap(RelayStreamSample.decode(Data(#"{"producers":[{"medias":["video, recvonly, H264"],"bytes_recv":425000}]}"#.utf8)))
-        let stalled = try XCTUnwrap(RelayStreamSample.decode(Data(#"{"producers":[{"medias":["video, recvonly, H264"],"bytes_recv":400000}]}"#.utf8)))
-        let audioOnly = try XCTUnwrap(RelayStreamSample.decode(Data(#"{"producers":[{"medias":["audio, recvonly, PCMA"],"bytes_recv":425000}]}"#.utf8)))
-
-        XCTAssertTrue(advancing.isAdvancing(from: first))
-        XCTAssertFalse(stalled.isAdvancing(from: first))
-        XCTAssertFalse(audioOnly.isAdvancing(from: first))
+    func testCachedFrameMustBeRecentAndNotFromTheFuture() {
+        XCTAssertTrue(NativeFrameFreshness.canPresentCachedFrame(now: 10, decodedAt: 9.9))
+        XCTAssertFalse(NativeFrameFreshness.canPresentCachedFrame(now: 10, decodedAt: 9.899))
+        XCTAssertFalse(NativeFrameFreshness.canPresentCachedFrame(now: 10, decodedAt: 10.001))
     }
 
-    func testRelaySampleCountsOnlyVideoProducerBytes() throws {
-        let first = try XCTUnwrap(RelayStreamSample.decode(Data(#"{"producers":[{"medias":["video, recvonly, H264"],"bytes_recv":400000},{"medias":["audio, recvonly, PCMA"],"bytes_recv":900000}]}"#.utf8)))
-        let next = try XCTUnwrap(RelayStreamSample.decode(Data(#"{"producers":[{"medias":["video, recvonly, H264"],"bytes_recv":400000},{"medias":["audio, recvonly, PCMA"],"bytes_recv":950000}]}"#.utf8)))
-
-        XCTAssertEqual(first.bytesReceived, 400000)
-        XCTAssertFalse(next.isAdvancing(from: first))
+    func testOpeningWaitsForAFrameDecodedAfterTheClick() {
+        XCTAssertTrue(NativeFrameFreshness.isPostOpenFrame(
+            sequence: 42,
+            baselineSequence: 41,
+            decodedAt: 10.001,
+            openedAt: 10
+        ))
+        XCTAssertFalse(NativeFrameFreshness.isPostOpenFrame(
+            sequence: 41,
+            baselineSequence: 41,
+            decodedAt: 10.001,
+            openedAt: 10
+        ))
+        XCTAssertFalse(NativeFrameFreshness.isPostOpenFrame(
+            sequence: 42,
+            baselineSequence: 41,
+            decodedAt: 9.999,
+            openedAt: 10
+        ))
     }
 
-    func testRelayRuntimeLivenessIgnoresMissingSamplesAndRequiresSustainedStall() {
-        var liveness = RelayRuntimeLiveness(stalledSampleLimit: 3)
-        let stalled = RelayStreamSample(hasVideo: true, bytesReceived: 400000)
-
-        XCTAssertFalse(liveness.observesFailure(stalled))
-        XCTAssertFalse(liveness.observesFailure(nil))
-        XCTAssertFalse(liveness.observesFailure(stalled))
-        XCTAssertFalse(liveness.observesFailure(stalled))
-        XCTAssertTrue(liveness.observesFailure(stalled))
+    func testNativeRetryPolicyIsFastThenBounded() {
+        XCTAssertEqual(NativeStreamRetryPolicy.delay(afterFailure: 1), 0.1)
+        XCTAssertEqual(NativeStreamRetryPolicy.delay(afterFailure: 2), 0.5)
+        XCTAssertEqual(NativeStreamRetryPolicy.delay(afterFailure: 3), 2)
+        XCTAssertEqual(NativeStreamRetryPolicy.delay(afterFailure: 20), 5)
     }
 
-    func testRelayRuntimeLivenessRequiresSustainedMissingSamples() {
-        var liveness = RelayRuntimeLiveness(stalledSampleLimit: 3, missingSampleLimit: 3)
-
-        XCTAssertFalse(liveness.observesFailure(nil))
-        XCTAssertFalse(liveness.observesFailure(nil))
-        XCTAssertTrue(liveness.observesFailure(nil))
+    func testH264PacketLossForcesDiscontinuityRecovery() {
+        XCTAssertFalse(H264StreamContinuity.isDiscontinuous(packetLoss: 0))
+        XCTAssertTrue(H264StreamContinuity.isDiscontinuous(packetLoss: 1))
     }
 
-    func testRelayRuntimeLivenessResetsAfterProgress() {
-        var liveness = RelayRuntimeLiveness(stalledSampleLimit: 3)
-
-        XCTAssertFalse(liveness.observesFailure(RelayStreamSample(hasVideo: true, bytesReceived: 400000)))
-        XCTAssertFalse(liveness.observesFailure(RelayStreamSample(hasVideo: true, bytesReceived: 400000)))
-        XCTAssertFalse(liveness.observesFailure(RelayStreamSample(hasVideo: true, bytesReceived: 425000)))
-        XCTAssertFalse(liveness.observesFailure(RelayStreamSample(hasVideo: true, bytesReceived: 425000)))
-        XCTAssertFalse(liveness.observesFailure(RelayStreamSample(hasVideo: true, bytesReceived: 425000)))
-        XCTAssertTrue(liveness.observesFailure(RelayStreamSample(hasVideo: true, bytesReceived: 425000)))
+    func testAVCCPacketizerRestoresLengthPrefixesExactlyOnce() {
+        let packet = AVCCPacketizer.packetizeH264Video([
+            Data([0x65, 0xAA, 0xBB]),
+            Data(),
+            Data([0x41, 0xCC]),
+        ])
+        XCTAssertEqual(packet, Data([
+            0, 0, 0, 3, 0x65, 0xAA, 0xBB,
+            0, 0, 0, 2, 0x41, 0xCC,
+        ]))
     }
 
-    func testRelayRetryPolicyBacksOffAndCaps() {
-        let policy = RelayRetryPolicy()
-
-        XCTAssertEqual(policy.delay(afterFailure: 1), 1)
-        XCTAssertEqual(policy.delay(afterFailure: 2), 2)
-        XCTAssertEqual(policy.delay(afterFailure: 3), 5)
-        XCTAssertEqual(policy.delay(afterFailure: 4), 10)
-        XCTAssertEqual(policy.delay(afterFailure: 5), 30)
-        XCTAssertEqual(policy.delay(afterFailure: 20), 30)
+    func testAVCCPacketizerDropsNonPictureH264NALUnits() {
+        let packet = AVCCPacketizer.packetizeH264Video([
+            Data([0x06, 0x01]),
+            Data([0x67, 0x02]),
+            Data([0x68, 0x03]),
+            Data([0x09, 0x04]),
+            Data([0x65, 0x05]),
+        ])
+        XCTAssertEqual(packet, Data([0, 0, 0, 2, 0x65, 0x05]))
     }
 }

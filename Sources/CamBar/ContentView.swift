@@ -58,6 +58,7 @@ struct ContentView: View {
             }
             .buttonStyle(.plain)
             .focusable(false)
+            .accessibilityIdentifier("com.cambar.open-window")
             .help("Open window")
             .padding(Self.contentInset + 8)
         }
