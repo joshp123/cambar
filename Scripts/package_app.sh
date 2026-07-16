@@ -24,10 +24,19 @@ if [[ ${#ARCH_LIST[@]} -eq 0 ]]; then
   HOST_ARCH=$(uname -m)
   ARCH_LIST=("$HOST_ARCH")
 fi
+if [[ ${#ARCH_LIST[@]} -ne 1 ]]; then
+  echo "ERROR: CamBar packaging supports one architecture at a time." >&2
+  exit 1
+fi
 
 GO2RTC_SOURCE=$(command -v go2rtc || true)
 if [[ ! -x "$GO2RTC_SOURCE" ]]; then
   echo "ERROR: go2rtc not found on PATH. Enter devenv shell or run: nix shell nixpkgs#go2rtc -c Scripts/package_app.sh" >&2
+  exit 1
+fi
+GO2RTC_ARCHES=$(lipo -archs "$GO2RTC_SOURCE")
+if [[ "$GO2RTC_ARCHES" != *"${ARCH_LIST[0]}"* ]]; then
+  echo "ERROR: go2rtc does not contain required architecture ${ARCH_LIST[0]} (have: ${GO2RTC_ARCHES})." >&2
   exit 1
 fi
 
