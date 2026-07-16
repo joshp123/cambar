@@ -268,6 +268,13 @@ private final class StatusItemDriver {
     }
 
     func waitForFrame(identifier: String, timeout: TimeInterval) throws -> CGRect {
+        try waitForStableElement(identifier: identifier, timeout: timeout).frame
+    }
+
+    private func waitForStableElement(
+        identifier: String,
+        timeout: TimeInterval
+    ) throws -> (element: AXUIElement, frame: CGRect) {
         let deadline = Date().addingTimeInterval(timeout)
         var previousFrame: CGRect?
         repeat {
@@ -276,7 +283,7 @@ private final class StatusItemDriver {
                !frame.isEmpty,
                isOnActiveDisplay(frame) {
                 if previousFrame == frame {
-                    return frame
+                    return (element, frame)
                 }
                 previousFrame = frame
             } else {
@@ -288,22 +295,18 @@ private final class StatusItemDriver {
     }
 
     func press(identifier: String) throws {
-        guard let element = findElement(identifier: identifier) else {
-            throw SmokeError.message("could not locate AX identifier \(identifier)")
-        }
+        let element = try waitForStableElement(identifier: identifier, timeout: 2).element
         guard AXUIElementPerformAction(element, kAXPressAction as CFString) == .success else {
             throw SmokeError.message("could not press AX identifier \(identifier)")
         }
     }
 
     func clickStatusItem() throws {
-        _ = try waitForFrame(timeout: 2)
         try press(identifier: statusItemIdentifier)
     }
 
     func burstClickStatusItem(count: Int = 2) throws {
         precondition(count >= 2)
-        _ = try waitForFrame(timeout: 2)
         for _ in 0..<count {
             try press(identifier: statusItemIdentifier)
             usleep(10_000)
