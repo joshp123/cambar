@@ -21,8 +21,9 @@ Purpose: one-stop shop for agents to develop + debug CamBar fast.
 cd /Users/josh/code/macos-cam-app
 
 devenv shell   # if toolchain not already present
-./Scripts/compile_and_run.sh
 ./Scripts/compile_and_run.sh --test
+./Scripts/deploy_app.sh   # explicit install; never launches or kills CamBar
+./Scripts/presentation_canary.sh   # explicit background launch; kills on unsolicited UI
 ```
 
 ## Runtime inputs (source of truth)
@@ -30,16 +31,15 @@ RTSP resolution order:
 1. `CAMBAR_RTSP_URL`
 2. `~/.config/camsnap/config.yaml`
 
-Debug env:
-- `CAMBAR_OPEN_WINDOW=1` -> opens the popout after relay/view warmup for visual testing
-
 ## Architecture map (read this before edits)
 - `Sources/CamBar/main.swift` + `AppDelegate.swift`
   - app lifecycle, menubar app wiring
 - `Sources/CamBar/ContentView.swift`
   - minimal popover UI
 - `Sources/CamBar/Go2RTCVideoView.swift`
-  - direct live video WebKit surface and prewarmed menu/window views
+  - direct live video WebKit surfaces with fixed ownership; menu and popout are never reparented
+- `Sources/CamBarCore/PopoverPresentationState.swift`
+  - fail-closed popover intent/callback reducer
 - `Sources/CamBar/CameraWindowController.swift`
   - large/popout window behavior
 - `Sources/CamBar/Go2RTCRelayController.swift`
@@ -63,7 +63,7 @@ Run in order:
 tailscale status
 tailscale ping -c 1 192.168.1.249
 nc -zv 192.168.1.249 554
-./Scripts/compile_and_run.sh --test
+./Scripts/verify_release_safety.sh
 ```
 
 Interpretation:
@@ -82,7 +82,9 @@ route -n get 192.168.1.249 | rg 'interface|gateway|flags'
 ```
 
 ## Done criteria before handoff
-- `./Scripts/compile_and_run.sh --test` passes.
+- `./Scripts/verify_release_safety.sh` passes.
+- The signed bundle is staged and installed without launching it automatically.
+- `./Scripts/presentation_canary.sh` reports no unsolicited presentation.
 - App launches and plays stream in:
   - menu popover
   - popout window

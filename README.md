@@ -29,23 +29,27 @@ I wanted to know when the postman is at the door. The vendor app for this camera
 
 ## First run
 
-- Open the menubar popover after the app has had a few seconds to warm the stream.
+- Install CamBar at `~/Applications/CamBar.app`, then launch it once.
+- Open the menubar popover after the stream has warmed.
 - Set `CAMBAR_RTSP_URL` if you want to override camera discovery.
 - The stream should already be live when the popover opens.
 - macOS may show CamBar under System Settings -> General -> Login Items if approval is needed.
 
 ## Requirements
 
-- macOS 14+
+- macOS 27
 - A reachable RTSP camera
 
 If you build from source, `go2rtc` must be on `PATH` at package time and is bundled into the app. The repo's `devenv.nix` provides it.
 
-## Run locally
+## Build and test
 
 ```bash
-./Scripts/compile_and_run.sh
+devenv shell
+./Scripts/compile_and_run.sh --test
 ```
+
+This stages a signed bundle at `.build/package/CamBar.app`. It does not install, launch or stop a running copy.
 
 ## Configuration
 
@@ -53,25 +57,21 @@ CamBar reads RTSP in this order:
 1) `CAMBAR_RTSP_URL`
 2) `~/.config/camsnap/config.yaml`
 
-Debug overrides:
+`CAMBAR_RTSP_URL` is a runtime override for a process launched from a shell. The config file is the durable source used by the installed login app. Never commit credentials from either source.
 
-```bash
-export CAMBAR_RTSP_URL="rtsp://user:pass@camera-host:554/Streaming/Channels/101"
-CAMBAR_OPEN_POPOVER=1 ~/Applications/CamBar.app/Contents/MacOS/CamBar
-./Scripts/debug_popover.sh
-```
-
-If neither source is available, startup shows an error with the missing path.
+If neither source is available, the popover reports that the camera is unavailable.
 
 ## Packaging
 
-`Scripts/package_app.sh` requires `go2rtc` on `PATH` and installs the signed app at `~/Applications/CamBar.app`, including its bundled `go2rtc` helper. Use:
+`Scripts/package_app.sh` requires `go2rtc` on `PATH` and stages a signed app containing the helper. To test, stage and install it:
 
 ```bash
 nix shell nixpkgs#go2rtc -c ./Scripts/compile_and_run.sh --test
+./Scripts/deploy_app.sh
+./Scripts/presentation_canary.sh
 ```
 
-`CAMBAR_DIAGNOSTICS=1` enables timing telemetry and go2rtc logs under `~/Library/Caches/CamBar/`. Normal use does not write stream telemetry or relay logs.
+Deployment refuses a dirty tree, a stale bundle, a running copy of CamBar, a changed signing identity or a failed safety check. It does not launch the app. The separate canary launches in the background, waits five seconds and stops CamBar if it presents a menu or window without user input. Timing and playback events are stored in a capped 512 KB log under `~/Library/Caches/CamBar/direct/`.
 
 ## Zero to MVP (anonymized prompts)
 
@@ -132,13 +132,13 @@ What the app does:
 - Renders the warmed stream directly; no normal-path ffmpeg/HLS/AVPlayer
 
 What I need you to do:
-1) Build and run the app
+1) Build, test and stage the app
 2) Set CAMBAR_RTSP_URL (or verify camsnap config)
 3) Verify warm menu open is effectively instant
 4) Ensure no credentials are committed
 
 Notes:
-- macOS 14+
+- macOS 27
 - CAMBAR_RTSP_URL can override discovery for debugging
 ```
 
