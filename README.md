@@ -1,3 +1,7 @@
+---
+written_by: ai
+---
+
 # CamBar
 
 [![License: AGPL-3.0](https://img.shields.io/badge/License-AGPL%20v3-blue.svg)](LICENSE)
@@ -67,7 +71,7 @@ If neither source is available, startup shows an error with the missing path.
 nix shell nixpkgs#go2rtc -c ./Scripts/compile_and_run.sh --test
 ```
 
-Timing telemetry is written to `~/Library/Caches/CamBar/direct/direct-stream-events.jsonl`.
+`CAMBAR_DIAGNOSTICS=1` enables timing telemetry and go2rtc logs under `~/Library/Caches/CamBar/`. Normal use does not write stream telemetry or relay logs.
 
 ## Zero to MVP (anonymized prompts)
 
