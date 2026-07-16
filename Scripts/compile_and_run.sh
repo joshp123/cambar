@@ -42,7 +42,7 @@ HOST_ARCH="$(uname -m)"
 ARCHES_VALUE="${HOST_ARCH}"
 
 log "==> package app"
-SIGNING_MODE=adhoc ARCHES="${ARCHES_VALUE}" APP_NAME="${APP_NAME}" BUNDLE_ID="com.cambar" MENU_BAR_APP=1 \
+ARCHES="${ARCHES_VALUE}" APP_NAME="${APP_NAME}" BUNDLE_ID="com.cambar" MENU_BAR_APP=1 \
   "${ROOT_DIR}/Scripts/package_app.sh" release
 
 log "==> launch app"

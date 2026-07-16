@@ -9,7 +9,7 @@ APP_NAME=${APP_NAME:-CamBar}
 BUNDLE_ID=${BUNDLE_ID:-com.cambar}
 MACOS_MIN_VERSION=${MACOS_MIN_VERSION:-14.0}
 MENU_BAR_APP=${MENU_BAR_APP:-1}
-SIGNING_MODE=${SIGNING_MODE:-}
+SIGNING_MODE=${SIGNING_MODE:-auto}
 APP_IDENTITY=${APP_IDENTITY:-}
 
 if [[ -f "$ROOT/version.env" ]]; then
@@ -222,10 +222,17 @@ if [[ ! -f "$APP_ENTITLEMENTS" ]]; then
 PLIST
 fi
 
+if [[ "$SIGNING_MODE" == "auto" && -z "$APP_IDENTITY" ]]; then
+  APP_IDENTITY=$(security find-identity -v -p codesigning 2>/dev/null | awk -F'"' '/^[[:space:]]*[0-9]+\)/ { print $2; exit }')
+  if [[ -z "$APP_IDENTITY" ]]; then
+    SIGNING_MODE=adhoc
+  fi
+fi
+
 if [[ "$SIGNING_MODE" == "adhoc" || -z "$APP_IDENTITY" ]]; then
   CODESIGN_ARGS=(--force --sign "-")
 else
-  CODESIGN_ARGS=(--force --timestamp --options runtime --sign "$APP_IDENTITY")
+  CODESIGN_ARGS=(--force --options runtime --sign "$APP_IDENTITY")
 fi
 
 # Sign embedded frameworks and their nested binaries before the app bundle.
@@ -242,6 +249,12 @@ sign_frameworks() {
   done
 }
 sign_frameworks
+
+for HELPER in "$APP/Contents/Resources/bin/"*; do
+  if [[ -f "$HELPER" && -x "$HELPER" ]]; then
+    codesign "${CODESIGN_ARGS[@]}" "$HELPER"
+  fi
+done
 
 codesign "${CODESIGN_ARGS[@]}" \
   --entitlements "$APP_ENTITLEMENTS" \

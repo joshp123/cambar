@@ -60,7 +60,7 @@ log "==> swift test"
 swift test -q
 
 log "==> package app"
-SIGNING_MODE=adhoc ARCHES="$(uname -m)" APP_NAME="$APP_NAME" BUNDLE_ID="com.cambar" MENU_BAR_APP=1 \
+ARCHES="$(uname -m)" APP_NAME="$APP_NAME" BUNDLE_ID="com.cambar" MENU_BAR_APP=1 \
   "$ROOT_DIR/Scripts/package_app.sh" release
 
 log "==> launch app with ${POPOVER_CYCLES} popover cycles"
