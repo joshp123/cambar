@@ -248,10 +248,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         uiState.videoSize = size
         popover.contentSize = ContentView.contentSize(forVideoSize: size)
         DirectStreamTelemetry.record(component: "app", event: "menu_open_requested", surface: "menu")
+        let presentationID = popoverPresentation.presentationID
         startMonitoringOutsideClicks()
         popover.show(relativeTo: button.bounds, of: button, preferredEdge: .maxY)
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { [weak self] in
             guard let self,
+                  self.popoverPresentation.presentationID == presentationID,
                   self.popoverPresentation.phase == .opening else { return }
             if self.popover.isShown {
                 DirectStreamTelemetry.record(component: "app", event: "menu_show_confirmed", surface: "menu")
@@ -273,7 +275,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
                 relayAvailable: relayAvailable,
                 relayReady: relayReady,
                 onClose: { [weak self] in
-                    self?.playbackController.prewarm()
+                    self?.playbackController.resumeAfterPopout()
                     self?.windowController = nil
                 }
             )

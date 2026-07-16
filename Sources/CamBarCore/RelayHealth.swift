@@ -18,9 +18,9 @@ public struct RelayStreamSample: Equatable, Sendable {
         var hasVideo = false
         var bytesReceived = 0
         for producer in producers {
-            if let medias = producer["medias"] as? [String] {
-                hasVideo = hasVideo || medias.contains { $0.hasPrefix("video") }
-            }
+            guard let medias = producer["medias"] as? [String],
+                  medias.contains(where: { $0.hasPrefix("video") }) else { continue }
+            hasVideo = true
             bytesReceived = max(bytesReceived, producer["bytes_recv"] as? Int ?? 0)
         }
         return RelayStreamSample(hasVideo: hasVideo, bytesReceived: bytesReceived)
@@ -28,6 +28,41 @@ public struct RelayStreamSample: Equatable, Sendable {
 
     public func isAdvancing(from previous: RelayStreamSample) -> Bool {
         hasVideo && previous.hasVideo && bytesReceived > previous.bytesReceived
+    }
+}
+
+public struct RelayRuntimeLiveness: Sendable {
+    private let stalledSampleLimit: Int
+    private let missingSampleLimit: Int
+    private var previousSample: RelayStreamSample?
+    private var stalledSamples = 0
+    private var missingSamples = 0
+
+    public init(stalledSampleLimit: Int = 15, missingSampleLimit: Int = 30) {
+        precondition(stalledSampleLimit > 0)
+        precondition(missingSampleLimit > 0)
+        self.stalledSampleLimit = stalledSampleLimit
+        self.missingSampleLimit = missingSampleLimit
+    }
+
+    public mutating func observesFailure(_ sample: RelayStreamSample?) -> Bool {
+        guard let sample else {
+            missingSamples += 1
+            return missingSamples >= missingSampleLimit
+        }
+        missingSamples = 0
+        guard let priorSample = previousSample else {
+            self.previousSample = sample
+            return false
+        }
+        defer { previousSample = sample }
+
+        if sample.isAdvancing(from: priorSample) {
+            stalledSamples = 0
+            return false
+        }
+        stalledSamples += 1
+        return stalledSamples >= stalledSampleLimit
     }
 }
 

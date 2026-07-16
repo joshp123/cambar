@@ -40,9 +40,6 @@ final class CameraPlaybackController: NSObject, WKNavigationDelegate, WKScriptMe
             tearDownSession(reason: "relay_unavailable")
             return
         }
-        if !isSuspended, session == nil {
-            startSession()
-        }
         if ready, isVisible {
             resumeOpen()
         }
@@ -58,30 +55,22 @@ final class CameraPlaybackController: NSObject, WKNavigationDelegate, WKScriptMe
 
     func hide() {
         isVisible = false
-        setJavaScriptVisibility(false)
         openToken = nil
         openStartedAt = nil
-        openWatchdog?.cancel()
-        openWatchdog = nil
-        stallWatchdog?.cancel()
-        stallWatchdog = nil
+        restartTask?.cancel()
+        restartTask = nil
+        tearDownSession(reason: "hidden")
         container.showCover(true, animated: false)
     }
 
     func suspend() {
         isSuspended = true
         hide()
-        restartTask?.cancel()
-        restartTask = nil
-        tearDownSession(reason: "suspended")
     }
 
-    func prewarm() {
+    func resumeAfterPopout() {
         guard isSuspended else { return }
         isSuspended = false
-        if relayAvailable, session == nil {
-            startSession()
-        }
     }
 
     func retryNow() {
@@ -161,18 +150,29 @@ final class CameraPlaybackController: NSObject, WKNavigationDelegate, WKScriptMe
     }
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+        recordNavigationPhase("navigation_finished", webView: webView)
         guard webView === session?.webView, isVisible, let openToken else { return }
         setJavaScriptVisibility(true)
         requestFreshOpenFrame(token: openToken)
     }
 
+    func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) {
+        recordNavigationPhase("navigation_committed", webView: webView)
+    }
+
+    func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
+        recordNavigationPhase("navigation_started", webView: webView)
+    }
+
     func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
         guard webView === session?.webView else { return }
+        recordNavigationPhase("navigation_failed", webView: webView)
         recover(reason: "navigation_failed")
     }
 
     func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
         guard webView === session?.webView else { return }
+        recordNavigationPhase("provisional_navigation_failed", webView: webView)
         recover(reason: "provisional_navigation_failed")
     }
 
@@ -197,7 +197,7 @@ final class CameraPlaybackController: NSObject, WKNavigationDelegate, WKScriptMe
     }
 
     private func startSession() {
-        guard relayAvailable, !isSuspended, session == nil else { return }
+        guard relayAvailable, relayReady, isVisible, !isSuspended, session == nil else { return }
         restartTask?.cancel()
         restartTask = nil
         let generation = UUID().uuidString
@@ -211,7 +211,11 @@ final class CameraPlaybackController: NSObject, WKNavigationDelegate, WKScriptMe
         webView.navigationDelegate = self
         webView.autoresizingMask = [.width, .height]
         container.attach(webView)
-        session = VideoSession(generation: generation, webView: webView)
+        session = VideoSession(
+            generation: generation,
+            webView: webView,
+            startedAt: ProcessInfo.processInfo.systemUptime
+        )
         DirectStreamTelemetry.record(component: "video", event: "session_started", surface: surface.rawValue)
         webView.loadHTMLString(Self.html(generation: generation), baseURL: URL(string: "http://127.0.0.1:1984/"))
     }
@@ -229,18 +233,10 @@ final class CameraPlaybackController: NSObject, WKNavigationDelegate, WKScriptMe
     }
 
     private func startOpenWatchdog(token: String) {
-        openWatchdog?.cancel()
+        guard openWatchdog == nil else { return }
         openWatchdog = Task { [weak self] in
-            try? await Task.sleep(for: .milliseconds(500))
-            guard !Task.isCancelled, let self, self.openToken == token, self.isVisible else { return }
-            DirectStreamTelemetry.record(
-                component: "video",
-                event: "open_slow",
-                surface: self.surface.rawValue,
-                elapsedMilliseconds: 500
-            )
-            self.requestFreshOpenFrame(token: token)
-            try? await Task.sleep(for: .seconds(4.5))
+            try? await Task.sleep(for: .seconds(3))
+            guard let self else { return }
             guard !Task.isCancelled, self.openToken == token, self.isVisible else { return }
             self.recover(reason: "visible_frame_timeout")
         }
@@ -260,7 +256,7 @@ final class CameraPlaybackController: NSObject, WKNavigationDelegate, WKScriptMe
     }
 
     private func recover(reason: String) {
-        guard relayAvailable, !isSuspended else { return }
+        guard relayAvailable, relayReady, isVisible, !isSuspended else { return }
         DirectStreamTelemetry.record(
             component: "video",
             event: "recover",
@@ -277,12 +273,28 @@ final class CameraPlaybackController: NSObject, WKNavigationDelegate, WKScriptMe
         restartTask?.cancel()
         restartTask = Task { [weak self] in
             try? await Task.sleep(for: .seconds(delay))
-            guard !Task.isCancelled, let self, self.relayAvailable, !self.isSuspended else { return }
+            guard !Task.isCancelled,
+                  let self,
+                  self.relayAvailable,
+                  self.relayReady,
+                  self.isVisible,
+                  !self.isSuspended else { return }
             self.startSession()
-            if self.isVisible, self.relayReady {
-                self.resumeOpen()
-            }
+            self.resumeOpen()
         }
+    }
+
+    private func recordNavigationPhase(_ event: String, webView: WKWebView) {
+        guard webView === session?.webView else { return }
+        let elapsed = session.map {
+            Int((ProcessInfo.processInfo.systemUptime - $0.startedAt) * 1_000)
+        }
+        DirectStreamTelemetry.record(
+            component: "video",
+            event: event,
+            surface: surface.rawValue,
+            elapsedMilliseconds: elapsed
+        )
     }
 
     private func tearDownSession(reason: String) {
@@ -314,10 +326,12 @@ final class CameraPlaybackController: NSObject, WKNavigationDelegate, WKScriptMe
     private final class VideoSession {
         let generation: String
         let webView: WKWebView
+        let startedAt: TimeInterval
 
-        init(generation: String, webView: WKWebView) {
+        init(generation: String, webView: WKWebView, startedAt: TimeInterval) {
             self.generation = generation
             self.webView = webView
+            self.startedAt = startedAt
         }
     }
 }

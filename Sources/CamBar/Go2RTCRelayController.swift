@@ -300,19 +300,12 @@ final class Go2RTCRelayController {
     }
 
     private func waitForRuntimeFailure(generation expectedGeneration: Int) async -> Failure {
-        var previousSample: RelayStreamSample?
-        var lastProgress = ProcessInfo.processInfo.systemUptime
+        guard let runningProcess = process else { return .cameraUnavailable }
+        var liveness = RelayRuntimeLiveness()
 
         while !Task.isCancelled, expectedGeneration == generation {
-            guard let runningProcess = process else { return .cameraUnavailable }
             guard runningProcess.isRunning else { return .processExited(runningProcess.terminationStatus) }
-            if let sample = await streamSample() {
-                if let previousSample, sample.isAdvancing(from: previousSample) {
-                    lastProgress = ProcessInfo.processInfo.systemUptime
-                }
-                previousSample = sample
-            }
-            if ProcessInfo.processInfo.systemUptime - lastProgress >= 5 {
+            if liveness.observesFailure(await streamSample()) {
                 return .cameraUnavailable
             }
             try? await Task.sleep(for: .seconds(1))

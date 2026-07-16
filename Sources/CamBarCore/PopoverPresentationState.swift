@@ -15,6 +15,7 @@ public struct PopoverPresentationState: Equatable, Sendable {
     public private(set) var phase: Phase = .closed
     public private(set) var wantsVisible = false
     public private(set) var lastIntentTimestamp = -Double.infinity
+    public private(set) var presentationID: UInt64 = 0
     private var reopenRequestedDuringClosing = false
 
     public init() {}
@@ -95,6 +96,7 @@ public struct PopoverPresentationState: Equatable, Sendable {
     private mutating func reconcile() -> Command {
         switch (phase, wantsVisible) {
         case (.closed, true):
+            presentationID &+= 1
             phase = .opening
             return .show
         case (.open, false):

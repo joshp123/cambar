@@ -84,6 +84,18 @@ final class CamBarTests: XCTestCase {
         XCTAssertEqual(state.phase, .open)
     }
 
+    func testPopoverReopenGetsNewPresentationIdentity() {
+        var state = PopoverPresentationState()
+
+        XCTAssertEqual(state.requestOpen(at: 1), .show)
+        let firstPresentation = state.presentationID
+        XCTAssertEqual(state.requestClose(at: 2), .none)
+        XCTAssertEqual(state.didClose(), .none)
+        XCTAssertEqual(state.requestOpen(at: 3), .show)
+
+        XCTAssertNotEqual(state.presentationID, firstPresentation)
+    }
+
     func testStaleOutsideClickCannotCloseNewerOpenIntent() {
         var state = PopoverPresentationState()
 
@@ -290,7 +302,7 @@ final class CamBarTests: XCTestCase {
         XCTAssertNil(StreamSourceResolver.loadCameraConfig(from: tempURL))
     }
 
-    func testRelayHealthRequiresCurrentVideoFlow() throws {
+    func testRelayStartupRequiresCurrentVideoFlow() throws {
         let first = try XCTUnwrap(RelayStreamSample.decode(Data(#"{"producers":[{"medias":["video, recvonly, H264"],"bytes_recv":400000}]}"#.utf8)))
         let advancing = try XCTUnwrap(RelayStreamSample.decode(Data(#"{"producers":[{"medias":["video, recvonly, H264"],"bytes_recv":425000}]}"#.utf8)))
         let stalled = try XCTUnwrap(RelayStreamSample.decode(Data(#"{"producers":[{"medias":["video, recvonly, H264"],"bytes_recv":400000}]}"#.utf8)))
@@ -299,6 +311,44 @@ final class CamBarTests: XCTestCase {
         XCTAssertTrue(advancing.isAdvancing(from: first))
         XCTAssertFalse(stalled.isAdvancing(from: first))
         XCTAssertFalse(audioOnly.isAdvancing(from: first))
+    }
+
+    func testRelaySampleCountsOnlyVideoProducerBytes() throws {
+        let first = try XCTUnwrap(RelayStreamSample.decode(Data(#"{"producers":[{"medias":["video, recvonly, H264"],"bytes_recv":400000},{"medias":["audio, recvonly, PCMA"],"bytes_recv":900000}]}"#.utf8)))
+        let next = try XCTUnwrap(RelayStreamSample.decode(Data(#"{"producers":[{"medias":["video, recvonly, H264"],"bytes_recv":400000},{"medias":["audio, recvonly, PCMA"],"bytes_recv":950000}]}"#.utf8)))
+
+        XCTAssertEqual(first.bytesReceived, 400000)
+        XCTAssertFalse(next.isAdvancing(from: first))
+    }
+
+    func testRelayRuntimeLivenessIgnoresMissingSamplesAndRequiresSustainedStall() {
+        var liveness = RelayRuntimeLiveness(stalledSampleLimit: 3)
+        let stalled = RelayStreamSample(hasVideo: true, bytesReceived: 400000)
+
+        XCTAssertFalse(liveness.observesFailure(stalled))
+        XCTAssertFalse(liveness.observesFailure(nil))
+        XCTAssertFalse(liveness.observesFailure(stalled))
+        XCTAssertFalse(liveness.observesFailure(stalled))
+        XCTAssertTrue(liveness.observesFailure(stalled))
+    }
+
+    func testRelayRuntimeLivenessRequiresSustainedMissingSamples() {
+        var liveness = RelayRuntimeLiveness(stalledSampleLimit: 3, missingSampleLimit: 3)
+
+        XCTAssertFalse(liveness.observesFailure(nil))
+        XCTAssertFalse(liveness.observesFailure(nil))
+        XCTAssertTrue(liveness.observesFailure(nil))
+    }
+
+    func testRelayRuntimeLivenessResetsAfterProgress() {
+        var liveness = RelayRuntimeLiveness(stalledSampleLimit: 3)
+
+        XCTAssertFalse(liveness.observesFailure(RelayStreamSample(hasVideo: true, bytesReceived: 400000)))
+        XCTAssertFalse(liveness.observesFailure(RelayStreamSample(hasVideo: true, bytesReceived: 400000)))
+        XCTAssertFalse(liveness.observesFailure(RelayStreamSample(hasVideo: true, bytesReceived: 425000)))
+        XCTAssertFalse(liveness.observesFailure(RelayStreamSample(hasVideo: true, bytesReceived: 425000)))
+        XCTAssertFalse(liveness.observesFailure(RelayStreamSample(hasVideo: true, bytesReceived: 425000)))
+        XCTAssertTrue(liveness.observesFailure(RelayStreamSample(hasVideo: true, bytesReceived: 425000)))
     }
 
     func testRelayRetryPolicyBacksOffAndCaps() {
