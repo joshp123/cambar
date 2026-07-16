@@ -14,6 +14,7 @@ final class CameraWindowController: NSWindowController, NSWindowDelegate {
         let hosting = NSHostingController(rootView: CameraWindowView(playback: playback))
         let window = NSWindow(contentViewController: hosting)
         window.title = "CamBar"
+        window.backgroundColor = .black
         let initialWidth: CGFloat = 1280
         let initialSize = NSSize(width: initialWidth, height: initialWidth * nativeVideoSize.height / nativeVideoSize.width)
         window.setContentSize(initialSize)

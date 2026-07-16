@@ -1,9 +1,11 @@
+import Observation
 import SwiftUI
 
 @MainActor
-final class CamBarUIState: ObservableObject {
-    @Published var relayAvailable = false
-    @Published var videoSize: CGSize
+@Observable
+final class CamBarUIState {
+    var relayAvailable = false
+    var videoSize: CGSize
 
     init(videoSize: CGSize) {
         self.videoSize = videoSize
@@ -11,20 +13,25 @@ final class CamBarUIState: ObservableObject {
 }
 
 struct ContentView: View {
-    static let videoBorderWidth: CGFloat = 2
+    static let contentInset: CGFloat = 6
+    static let videoCornerRadius: CGFloat = 10
 
-    @ObservedObject var state: CamBarUIState
+    var state: CamBarUIState
     let playback: CameraPlaybackController
     let onOpenWindow: () -> Void
     let onRetry: () -> Void
 
     var body: some View {
         ZStack(alignment: .bottomTrailing) {
-            Color.white
+            Color(nsColor: .windowBackgroundColor)
 
-            CameraVideoView(playback: playback, surface: .menu, cornerRadius: 0)
+            CameraVideoView(
+                playback: playback,
+                surface: .menu,
+                cornerRadius: Self.videoCornerRadius
+            )
                 .frame(width: state.videoSize.width, height: state.videoSize.height)
-                .padding(Self.videoBorderWidth)
+                .padding(Self.contentInset)
 
             if !state.relayAvailable {
                 Button("Camera unavailable — retry", action: onRetry)
@@ -35,19 +42,26 @@ struct ContentView: View {
                 onOpenWindow()
             } label: {
                 Image(systemName: "arrow.up.left.and.arrow.down.right")
+                    .font(.system(size: 12, weight: .semibold))
+                    .frame(width: 28, height: 28)
+                    .background(.regularMaterial, in: Circle())
+                    .overlay {
+                        Circle().stroke(.white.opacity(0.35), lineWidth: 0.5)
+                    }
+                    .contentShape(Circle())
             }
-            .buttonStyle(.bordered)
-            .controlSize(.small)
+            .buttonStyle(.plain)
+            .focusable(false)
             .help("Open window")
-            .padding(10)
+            .padding(Self.contentInset + 8)
         }
         .frame(width: contentSize.width, height: contentSize.height)
     }
 
     static func contentSize(forVideoSize videoSize: CGSize) -> CGSize {
         CGSize(
-            width: videoSize.width + videoBorderWidth * 2,
-            height: videoSize.height + videoBorderWidth * 2
+            width: videoSize.width + contentInset * 2,
+            height: videoSize.height + contentInset * 2
         )
     }
 
