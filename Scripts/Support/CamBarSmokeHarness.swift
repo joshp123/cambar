@@ -197,7 +197,7 @@ private final class StatusItemDriver {
 
         let target = CGPoint(x: frame.midX, y: frame.midY)
         print("Clicking status item frame=\(NSStringFromRect(frame)) target=\(NSStringFromPoint(target))")
-        guard let source = CGEventSource(stateID: .combinedSessionState),
+        guard let source = CGEventSource(stateID: .hidSystemState),
               let moved = CGEvent(mouseEventSource: source, mouseType: .mouseMoved, mouseCursorPosition: target, mouseButton: .left),
               let down = CGEvent(mouseEventSource: source, mouseType: .leftMouseDown, mouseCursorPosition: target, mouseButton: .left),
               let up = CGEvent(mouseEventSource: source, mouseType: .leftMouseUp, mouseCursorPosition: target, mouseButton: .left) else {
