@@ -2,6 +2,127 @@ import XCTest
 import CamBarCore
 
 final class CamBarTests: XCTestCase {
+    func testPopoverOutsideCloseCannotReopenItself() {
+        var state = PopoverPresentationState()
+
+        XCTAssertEqual(state.toggle(at: 1), .show)
+        XCTAssertEqual(state.didShow(), .none)
+        XCTAssertEqual(state.requestClose(at: 2), .close)
+        XCTAssertEqual(state.didClose(), .none)
+        XCTAssertEqual(state.phase, .closed)
+        XCTAssertFalse(state.wantsVisible)
+    }
+
+    func testPopoverCloseDuringOpeningConvergesClosed() {
+        var state = PopoverPresentationState()
+
+        XCTAssertEqual(state.toggle(at: 1), .show)
+        XCTAssertEqual(state.requestClose(at: 2), .none)
+        XCTAssertEqual(state.didShow(), .close)
+        XCTAssertEqual(state.didClose(), .none)
+        XCTAssertEqual(state.phase, .closed)
+    }
+
+    func testPopoverOpenDuringClosingConvergesOpen() {
+        var state = PopoverPresentationState()
+
+        XCTAssertEqual(state.toggle(at: 1), .show)
+        XCTAssertEqual(state.didShow(), .none)
+        XCTAssertEqual(state.toggle(at: 2), .close)
+        XCTAssertEqual(state.toggle(at: 3), .none)
+        XCTAssertEqual(state.didClose(), .show)
+        XCTAssertEqual(state.didShow(), .none)
+        XCTAssertEqual(state.phase, .open)
+    }
+
+    func testStaleOutsideClickCannotCloseNewerOpenIntent() {
+        var state = PopoverPresentationState()
+
+        XCTAssertEqual(state.toggle(at: 10), .show)
+        XCTAssertEqual(state.didShow(), .none)
+        XCTAssertEqual(state.toggle(at: 20), .close)
+        XCTAssertEqual(state.didClose(), .none)
+        XCTAssertEqual(state.toggle(at: 30), .show)
+        XCTAssertEqual(state.requestClose(at: 25), .none)
+        XCTAssertTrue(state.wantsVisible)
+        XCTAssertEqual(state.phase, .opening)
+    }
+
+    func testFailedPresentationStopsWithoutRetrying() {
+        var state = PopoverPresentationState()
+
+        XCTAssertEqual(state.toggle(at: 1), .show)
+        state.presentationFailed()
+
+        XCTAssertEqual(state.phase, .closed)
+        XCTAssertFalse(state.wantsVisible)
+    }
+
+    func testUnexpectedCloseWhileOpenFailsClosed() {
+        var state = PopoverPresentationState()
+        XCTAssertEqual(state.toggle(at: 1), .show)
+        XCTAssertEqual(state.didShow(), .none)
+
+        XCTAssertEqual(state.didClose(), .none)
+
+        XCTAssertEqual(state.phase, .closed)
+        XCTAssertFalse(state.wantsVisible)
+    }
+
+    func testUnexpectedCloseWhileOpeningFailsClosed() {
+        var state = PopoverPresentationState()
+        XCTAssertEqual(state.toggle(at: 1), .show)
+
+        XCTAssertEqual(state.didClose(), .none)
+
+        XCTAssertEqual(state.phase, .closed)
+        XCTAssertFalse(state.wantsVisible)
+    }
+
+    func testLateDidShowFailsClosed() {
+        var state = PopoverPresentationState()
+
+        XCTAssertEqual(state.didShow(), .close)
+        XCTAssertEqual(state.phase, .closed)
+        XCTAssertEqual(state.didClose(), .none)
+        XCTAssertEqual(state.didClose(), .none)
+
+        XCTAssertEqual(state.phase, .closed)
+        XCTAssertFalse(state.wantsVisible)
+    }
+
+    func testSpuriousDidShowWithoutDidCloseCannotWedgeNextOpen() {
+        var state = PopoverPresentationState()
+
+        XCTAssertEqual(state.didShow(), .close)
+        XCTAssertEqual(state.toggle(at: 1), .show)
+
+        XCTAssertEqual(state.phase, .opening)
+        XCTAssertTrue(state.wantsVisible)
+    }
+
+    func testLateDidShowAfterPresentationFailureIsClosed() {
+        var state = PopoverPresentationState()
+
+        XCTAssertEqual(state.toggle(at: 1), .show)
+        state.presentationFailed()
+        XCTAssertEqual(state.didShow(), .close)
+        XCTAssertEqual(state.didClose(), .none)
+
+        XCTAssertEqual(state.phase, .closed)
+        XCTAssertFalse(state.wantsVisible)
+    }
+
+    func testEqualTimestampIsRejectedAsStale() {
+        var state = PopoverPresentationState()
+        XCTAssertEqual(state.toggle(at: 1), .show)
+
+        XCTAssertEqual(state.requestClose(at: 1), .none)
+
+        XCTAssertTrue(state.wantsVisible)
+        XCTAssertEqual(state.phase, .opening)
+    }
+
     func testMaskRtspURLHidesPassword() {
         let raw = "rtsp://admin:secret@192.168.1.249:554/Streaming/Channels/101"
 

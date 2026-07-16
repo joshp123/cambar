@@ -9,112 +9,79 @@ final class CameraPlaybackController: NSObject, WKNavigationDelegate, WKScriptMe
         case window
     }
 
+    let container: CameraVideoContainerView
+
+    private let surface: Surface
     private var relayAvailable = false
     private var relayReady = false
+    private var isVisible = false
+    private var isSuspended = false
     private var session: VideoSession?
-    private var activeSurface: Surface?
-    private var containers: [Surface: WeakVideoContainer] = [:]
     private var openToken: String?
     private var openStartedAt: TimeInterval?
     private var restartCount = 0
     private var startupWatchdog: Task<Void, Never>?
     private var openWatchdog: Task<Void, Never>?
+    private var stallWatchdog: Task<Void, Never>?
     private var restartTask: Task<Void, Never>?
-    private let parkingView = CameraVideoContainerView(cornerStyle: .square)
-    private lazy var parkingWindow = makeParkingWindow()
+
+    init(surface: Surface, cornerStyle: CameraVideoCornerStyle) {
+        self.surface = surface
+        self.container = CameraVideoContainerView(cornerStyle: cornerStyle)
+        super.init()
+    }
 
     func setRelayState(available: Bool, ready: Bool) {
         relayAvailable = available
         relayReady = ready
         guard available else {
+            if isVisible, openToken == nil {
+                beginPresentation()
+            }
             tearDownSession(reason: "relay_unavailable")
             return
         }
-        if session == nil {
+        if !isSuspended, session == nil {
             startSession()
         }
-        guard ready else { return }
-        if let activeSurface {
-            resumeOpen(on: activeSurface)
-        } else {
-            warm()
+        if ready, isVisible {
+            resumeOpen()
         }
     }
 
-    func register(_ container: CameraVideoContainerView, for surface: Surface) {
-        let isNewContainer = containers[surface]?.view !== container
-        containers[surface] = WeakVideoContainer(container)
-        guard activeSurface == surface else { return }
-        if isNewContainer {
-            DirectStreamTelemetry.record(
-                component: "video",
-                event: "surface_registered",
-                surface: surface.rawValue
-            )
-        }
-        resumeOpen(on: surface)
-    }
-
-    func unregister(_ container: CameraVideoContainerView, for surface: Surface) {
-        guard containers[surface]?.view === container else { return }
-        containers[surface] = nil
-        if activeSurface == surface {
-            parkSession()
-        }
-    }
-
-    private func warm() {
+    func show() {
+        isSuspended = false
+        isVisible = true
+        beginPresentation()
         guard relayReady else { return }
-        guard session == nil else {
-            if activeSurface == nil {
-                parkSession()
-            }
-            return
-        }
-        startSession()
+        resumeOpen()
     }
 
-    func show(_ surface: Surface) {
-        activeSurface = surface
-        let token = UUID().uuidString
-        openToken = token
-        openStartedAt = ProcessInfo.processInfo.systemUptime
-        containers[surface]?.view?.showCover(true)
-
-        guard relayReady else { return }
-        resumeOpen(on: surface)
-    }
-
-    private func resumeOpen(on surface: Surface) {
-        if session == nil {
-            startSession()
-        }
-        guard let session,
-              let container = containers[surface]?.view else {
-            DirectStreamTelemetry.record(
-                component: "video",
-                event: "open_waiting_for_surface",
-                surface: surface.rawValue
-            )
-            return
-        }
-        attach(session.webView, to: container)
-        guard let openToken else { return }
-        container.showCover(true)
-        requestFreshOpenFrame(token: openToken)
-        if session.hasFrame {
-            startOpenWatchdog(token: openToken)
-        }
-    }
-
-    func hide(_ surface: Surface) {
-        guard activeSurface == surface else { return }
-        activeSurface = nil
+    func hide() {
+        isVisible = false
         openToken = nil
         openStartedAt = nil
         openWatchdog?.cancel()
         openWatchdog = nil
-        parkSession()
+        stallWatchdog?.cancel()
+        stallWatchdog = nil
+        container.showCover(true, animated: false)
+    }
+
+    func suspend() {
+        isSuspended = true
+        hide()
+        restartTask?.cancel()
+        restartTask = nil
+        tearDownSession(reason: "suspended")
+    }
+
+    func prewarm() {
+        guard isSuspended else { return }
+        isSuspended = false
+        if relayAvailable, session == nil {
+            startSession()
+        }
     }
 
     func retryNow() {
@@ -125,10 +92,28 @@ final class CameraPlaybackController: NSObject, WKNavigationDelegate, WKScriptMe
     func shutdown() {
         relayAvailable = false
         relayReady = false
-        activeSurface = nil
+        isVisible = false
+        isSuspended = true
         restartTask?.cancel()
         tearDownSession(reason: "shutdown")
-        parkingWindow.orderOut(nil)
+    }
+
+    private func resumeOpen() {
+        if session == nil {
+            startSession()
+        }
+        guard let session, let openToken else { return }
+        container.showCover(true)
+        requestFreshOpenFrame(token: openToken)
+        if session.hasFrame {
+            startOpenWatchdog(token: openToken)
+        }
+    }
+
+    private func beginPresentation() {
+        openToken = UUID().uuidString
+        openStartedAt = ProcessInfo.processInfo.systemUptime
+        container.showCover(true)
     }
 
     func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
@@ -141,17 +126,14 @@ final class CameraPlaybackController: NSObject, WKNavigationDelegate, WKScriptMe
         }
 
         let elapsed = body["elapsed_ms"] as? Int
-        let visibleStall = event == "frame_stalled" && activeSurface != nil && NSApp.isActive
-        if event != "frame_stalled" || visibleStall {
-            DirectStreamTelemetry.record(
-                component: "video",
-                event: event,
-                stream: Go2RTCRelayController.mainStreamName,
-                surface: activeSurface?.rawValue,
-                elapsedMilliseconds: elapsed,
-                detail: body["detail"] as? String
-            )
-        }
+        DirectStreamTelemetry.record(
+            component: "video",
+            event: event,
+            stream: Go2RTCRelayController.mainStreamName,
+            surface: surface.rawValue,
+            elapsedMilliseconds: elapsed,
+            detail: body["detail"] as? String
+        )
 
         switch event {
         case "first_frame":
@@ -159,31 +141,29 @@ final class CameraPlaybackController: NSObject, WKNavigationDelegate, WKScriptMe
             restartCount = 0
             startupWatchdog?.cancel()
             startupWatchdog = nil
-            if let openToken {
+            if isVisible, let openToken {
                 requestFreshOpenFrame(token: openToken)
                 startOpenWatchdog(token: openToken)
             }
         case "frame_candidate":
-            guard let token = body["token"] as? String, token == openToken,
-                  let surface = activeSurface,
-                  let container = containers[surface]?.view else { return }
-            verifyVisibleOpenFrame(token: token, surface: surface, container: container)
+            acceptOpenFrame(body)
+        case "frame_resumed":
+            stallWatchdog?.cancel()
+            stallWatchdog = nil
+        case "frame_stalled":
+            if isVisible {
+                handleVisibleStall(generation: generation)
+            }
         case "video_error":
             recover(reason: event)
-        case "frame_stalled":
-            if visibleStall {
-                recover(reason: event)
-            }
         default:
             break
         }
     }
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
-        guard webView === session?.webView else { return }
-        if let openToken {
-            requestFreshOpenFrame(token: openToken)
-        }
+        guard webView === session?.webView, isVisible, let openToken else { return }
+        requestFreshOpenFrame(token: openToken)
     }
 
     func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
@@ -196,8 +176,27 @@ final class CameraPlaybackController: NSObject, WKNavigationDelegate, WKScriptMe
         recover(reason: "provisional_navigation_failed")
     }
 
+    private func acceptOpenFrame(_ body: [String: Any]) {
+        guard isVisible,
+              let token = body["token"] as? String,
+              token == openToken else { return }
+        openToken = nil
+        openWatchdog?.cancel()
+        openWatchdog = nil
+        container.showCover(false)
+        let elapsed = openStartedAt.map {
+            Int((ProcessInfo.processInfo.systemUptime - $0) * 1_000)
+        }
+        DirectStreamTelemetry.record(
+            component: "video",
+            event: "live_view",
+            surface: surface.rawValue,
+            elapsedMilliseconds: elapsed
+        )
+    }
+
     private func startSession() {
-        guard relayAvailable, session == nil else { return }
+        guard relayAvailable, !isSuspended, session == nil else { return }
         restartTask?.cancel()
         restartTask = nil
         let generation = UUID().uuidString
@@ -206,41 +205,15 @@ final class CameraPlaybackController: NSObject, WKNavigationDelegate, WKScriptMe
         configuration.mediaTypesRequiringUserActionForPlayback = []
         configuration.userContentController.add(self, name: "cambarVideoEvent")
 
-        _ = parkingWindow
-        let webView = CameraWebView(frame: parkingView.bounds, configuration: configuration)
+        let webView = CameraWebView(frame: container.bounds, configuration: configuration)
         webView.setValue(false, forKey: "drawsBackground")
         webView.navigationDelegate = self
         webView.autoresizingMask = [.width, .height]
+        container.attach(webView)
         session = VideoSession(generation: generation, webView: webView)
-
-        if let activeSurface, let container = containers[activeSurface]?.view {
-            attach(webView, to: container)
-        } else {
-            parkSession()
-        }
-
+        DirectStreamTelemetry.record(component: "video", event: "session_started", surface: surface.rawValue)
         webView.loadHTMLString(Self.html(generation: generation), baseURL: URL(string: "http://127.0.0.1:1984/"))
         startStartupWatchdog(generation: generation)
-    }
-
-    private func attach(_ webView: WKWebView, to container: CameraVideoContainerView) {
-        if webView.superview !== container {
-            container.attach(webView)
-            DirectStreamTelemetry.record(
-                component: "video",
-                event: "surface_attached",
-                surface: activeSurface?.rawValue
-            )
-        }
-        if container !== parkingView {
-            parkingWindow.orderOut(nil)
-        }
-    }
-
-    private func parkSession() {
-        guard let webView = session?.webView else { return }
-        attach(webView, to: parkingView)
-        parkingWindow.orderFront(nil)
     }
 
     private func requestFreshOpenFrame(token: String) {
@@ -264,23 +237,44 @@ final class CameraPlaybackController: NSObject, WKNavigationDelegate, WKScriptMe
         openWatchdog?.cancel()
         openWatchdog = Task { [weak self] in
             try? await Task.sleep(for: .milliseconds(500))
-            guard !Task.isCancelled, let self, self.openToken == token else { return }
+            guard !Task.isCancelled, let self, self.openToken == token, self.isVisible else { return }
             DirectStreamTelemetry.record(
                 component: "video",
                 event: "open_slow",
-                surface: self.activeSurface?.rawValue,
+                surface: self.surface.rawValue,
                 elapsedMilliseconds: 500
             )
             self.requestFreshOpenFrame(token: token)
-            try? await Task.sleep(for: .milliseconds(500))
-            guard !Task.isCancelled, self.openToken == token else { return }
-            self.recover(reason: "open_frame_timeout")
+            try? await Task.sleep(for: .seconds(4.5))
+            guard !Task.isCancelled, self.openToken == token, self.isVisible else { return }
+            self.recover(reason: "visible_frame_timeout")
+        }
+    }
+
+    private func handleVisibleStall(generation: String) {
+        guard stallWatchdog == nil else { return }
+        session?.webView.evaluateJavaScript("window.__cambarResume && window.__cambarResume();")
+        stallWatchdog = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(3))
+            guard !Task.isCancelled, let self,
+                  self.isVisible,
+                  self.session?.generation == generation else { return }
+            self.stallWatchdog = nil
+            self.recover(reason: "visible_frame_stalled")
         }
     }
 
     private func recover(reason: String) {
-        guard relayAvailable else { return }
-        DirectStreamTelemetry.record(component: "video", event: "recover", detail: "reason=\(reason)")
+        guard relayAvailable, !isSuspended else { return }
+        DirectStreamTelemetry.record(
+            component: "video",
+            event: "recover",
+            surface: surface.rawValue,
+            detail: "reason=\(reason)"
+        )
+        if isVisible {
+            beginPresentation()
+        }
         tearDownSession(reason: reason)
         restartCount += 1
         let delays: [TimeInterval] = [0.1, 0.5, 2, 5]
@@ -288,7 +282,7 @@ final class CameraPlaybackController: NSObject, WKNavigationDelegate, WKScriptMe
         restartTask?.cancel()
         restartTask = Task { [weak self] in
             try? await Task.sleep(for: .seconds(delay))
-            guard !Task.isCancelled, let self, self.relayAvailable else { return }
+            guard !Task.isCancelled, let self, self.relayAvailable, !self.isSuspended else { return }
             self.startSession()
         }
     }
@@ -298,126 +292,21 @@ final class CameraPlaybackController: NSObject, WKNavigationDelegate, WKScriptMe
         startupWatchdog = nil
         openWatchdog?.cancel()
         openWatchdog = nil
+        stallWatchdog?.cancel()
+        stallWatchdog = nil
         guard let session else { return }
-        DirectStreamTelemetry.record(component: "video", event: "session_stopped", detail: "reason=\(reason)")
+        DirectStreamTelemetry.record(
+            component: "video",
+            event: "session_stopped",
+            surface: surface.rawValue,
+            detail: "reason=\(reason)"
+        )
         session.webView.evaluateJavaScript(Self.stopJavaScript())
         session.webView.stopLoading()
         session.webView.navigationDelegate = nil
         session.webView.configuration.userContentController.removeScriptMessageHandler(forName: "cambarVideoEvent")
         session.webView.removeFromSuperview()
         self.session = nil
-        parkingWindow.orderOut(nil)
-    }
-
-    private func makeParkingWindow() -> NSWindow {
-        let window = NSWindow(
-            contentRect: NSRect(x: -20_000, y: -20_000, width: 336, height: 190),
-            styleMask: [.borderless],
-            backing: .buffered,
-            defer: false
-        )
-        window.backgroundColor = .black
-        window.isOpaque = true
-        window.alphaValue = 0.01
-        window.ignoresMouseEvents = true
-        window.hasShadow = false
-        window.collectionBehavior = [.stationary, .ignoresCycle]
-        window.contentView = parkingView
-        return window
-    }
-
-    private func verifyVisibleOpenFrame(
-        token: String,
-        surface: Surface,
-        container: CameraVideoContainerView
-    ) {
-        guard let webView = session?.webView else { return }
-        let configuration = WKSnapshotConfiguration()
-        configuration.rect = webView.bounds
-        configuration.snapshotWidth = 64
-        webView.takeSnapshot(with: configuration) { [weak self, weak container] image, error in
-            Task { @MainActor [weak self, weak container] in
-                guard let self, self.openToken == token,
-                      self.session?.webView === webView,
-                      self.activeSurface == surface,
-                      let container,
-                      self.containers[surface]?.view === container else { return }
-                guard error == nil,
-                      let image,
-                      let tiff = image.tiffRepresentation,
-                      let bitmap = NSBitmapImageRep(data: tiff) else {
-                    DirectStreamTelemetry.record(
-                        component: "video",
-                        event: "visible_frame_check_failed",
-                        surface: surface.rawValue
-                    )
-                    self.requestFreshOpenFrame(token: token)
-                    return
-                }
-                let ratios = Self.pixelRatios(bitmap)
-                let openElapsed = self.openStartedAt.map {
-                    Int((ProcessInfo.processInfo.systemUptime - $0) * 1_000)
-                }
-                DirectStreamTelemetry.record(
-                    component: "video",
-                    event: "webview_snapshot_sample",
-                    surface: surface.rawValue,
-                    elapsedMilliseconds: openElapsed,
-                    detail: "white=\(ratios.white) dark=\(ratios.dark) color=\(ratios.color) pixels=\(ratios.total)"
-                )
-                guard ratios.total > 0, ratios.dark < 0.995 else {
-                    DirectStreamTelemetry.record(
-                        component: "video",
-                        event: "black_output_suspected",
-                        surface: surface.rawValue,
-                        elapsedMilliseconds: openElapsed
-                    )
-                    self.requestFreshOpenFrame(token: token)
-                    return
-                }
-                self.openToken = nil
-                self.openWatchdog?.cancel()
-                self.openWatchdog = nil
-                container.showCover(false)
-                DirectStreamTelemetry.record(
-                    component: "video",
-                    event: "open_frame",
-                    surface: surface.rawValue,
-                    elapsedMilliseconds: openElapsed
-                )
-                DirectStreamTelemetry.record(
-                    component: "video",
-                    event: "live_view",
-                    surface: surface.rawValue,
-                    elapsedMilliseconds: openElapsed
-                )
-            }
-        }
-    }
-
-    private static func pixelRatios(_ bitmap: NSBitmapImageRep) -> (white: Double, dark: Double, color: Double, total: Int) {
-        let step = max(1, min(bitmap.pixelsWide, bitmap.pixelsHigh) / 300)
-        var total = 0
-        var white = 0
-        var dark = 0
-        for y in stride(from: 0, to: bitmap.pixelsHigh, by: step) {
-            for x in stride(from: 0, to: bitmap.pixelsWide, by: step) {
-                guard let color = bitmap.colorAt(x: x, y: y)?.usingColorSpace(.sRGB), color.alphaComponent > 0.1 else { continue }
-                total += 1
-                if color.redComponent > 0.92, color.greenComponent > 0.92, color.blueComponent > 0.92 {
-                    white += 1
-                } else if color.redComponent < 0.05, color.greenComponent < 0.05, color.blueComponent < 0.05 {
-                    dark += 1
-                }
-            }
-        }
-        guard total > 0 else { return (1, 0, 0, 0) }
-        return (
-            Double(white) / Double(total),
-            Double(dark) / Double(total),
-            Double(total - white - dark) / Double(total),
-            total
-        )
     }
 
     private static func javaScriptString(_ value: String) -> String {
@@ -447,6 +336,7 @@ private final class CameraWebView: WKWebView {
 @MainActor
 final class CameraVideoContainerView: NSView {
     private let cover = NSView()
+    private let progressIndicator = NSProgressIndicator()
     private var cornerStyle: CameraVideoCornerStyle
 
     init(cornerStyle: CameraVideoCornerStyle) {
@@ -458,6 +348,9 @@ final class CameraVideoContainerView: NSView {
         layer?.masksToBounds = true
         cover.wantsLayer = true
         cover.layer?.backgroundColor = NSColor.black.cgColor
+        progressIndicator.style = .spinning
+        progressIndicator.controlSize = .small
+        cover.addSubview(progressIndicator)
         addSubview(cover)
     }
 
@@ -485,6 +378,11 @@ final class CameraVideoContainerView: NSView {
         applyCornerRadius()
         subviews.first { $0 is WKWebView }?.frame = bounds
         cover.frame = bounds
+        progressIndicator.sizeToFit()
+        progressIndicator.frame.origin = NSPoint(
+            x: floor((cover.bounds.width - progressIndicator.frame.width) / 2),
+            y: floor((cover.bounds.height - progressIndicator.frame.height) / 2)
+        )
     }
 
     func setCornerStyle(_ style: CameraVideoCornerStyle) {
@@ -494,25 +392,22 @@ final class CameraVideoContainerView: NSView {
     }
 
     func attach(_ webView: WKWebView) {
-        webView.removeFromSuperview()
+        guard webView.superview !== self else { return }
         addSubview(webView, positioned: .below, relativeTo: cover)
         webView.frame = bounds
         needsLayout = true
     }
 
-    func showCover(_ show: Bool) {
+    func showCover(_ show: Bool, animated: Bool = true) {
         cover.isHidden = !show
+        if show, animated {
+            progressIndicator.startAnimation(nil)
+        } else {
+            progressIndicator.stopAnimation(nil)
+        }
     }
 
     private func applyCornerRadius() {
         layer?.cornerRadius = effectiveCornerRadii?.topLeft ?? 0
-    }
-}
-
-private final class WeakVideoContainer {
-    weak var view: CameraVideoContainerView?
-
-    init(_ view: CameraVideoContainerView) {
-        self.view = view
     }
 }

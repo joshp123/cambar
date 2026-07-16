@@ -30,11 +30,7 @@ struct ContentView: View {
         ZStack(alignment: .bottomTrailing) {
             Color(nsColor: .windowBackgroundColor)
 
-            CameraVideoView(
-                playback: playback,
-                surface: .menu,
-                cornerStyle: .containerConcentric
-            )
+            CameraVideoView(playback: playback)
                 .frame(width: state.videoSize.width, height: state.videoSize.height)
                 .padding(Self.contentInset)
 

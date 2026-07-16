@@ -3,27 +3,21 @@ import CamBarCore
 import SwiftUI
 
 @MainActor
-final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate, @MainActor NSStatusItemExpandedInterfaceDelegate {
-    private enum PopoverPresentationState: String {
-        case closed
-        case opening
-        case open
-        case closing
-    }
-
+final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     private let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
     private let popover = NSPopover()
     private let loginItemController = LoginItemController()
     private let relayController = Go2RTCRelayController()
-    private let playbackController = CameraPlaybackController()
+    private let playbackController = CameraPlaybackController(
+        surface: .menu,
+        cornerStyle: .containerConcentric
+    )
     private var windowController: CameraWindowController?
     private var wakeObserver: NSObjectProtocol?
     private var outsideClickMonitor: Any?
-    private var popoverState: PopoverPresentationState = .closed
-    private var wantsPopoverVisible = false
-    private var debugPopoverRemaining = 0
-    private var debugPopoverVisibleSeconds: TimeInterval = 2
-    private var didRunDebugHooks = false
+    private var popoverPresentation = PopoverPresentationState()
+    private var relayAvailable = false
+    private var relayReady = false
     private let nativeVideoSize = CGSize(width: 2688, height: 1520)
     private lazy var uiState = CamBarUIState(videoSize: bestPopoverVideoSize(anchorButton: statusItem.button))
 
@@ -31,15 +25,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate, @Ma
         DirectStreamTelemetry.reset()
         DirectStreamTelemetry.record(component: "app", event: "launch")
         loginItemController.ensureRegistered()
+        configureMainMenu()
         configureStatusItem()
         configurePopover()
-        monitorOutsideClicks()
 
         relayController.onStateChange = { [weak self] state in
             self?.relayStateDidChange(state)
         }
         relayController.start()
-        scheduleDebugPopoverHooks()
 
         wakeObserver = NSWorkspace.shared.notificationCenter.addObserver(
             forName: NSWorkspace.didWakeNotification,
@@ -59,6 +52,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate, @Ma
         if let outsideClickMonitor {
             NSEvent.removeMonitor(outsideClickMonitor)
         }
+        windowController?.shutdown()
         playbackController.shutdown()
         relayController.stop()
         DirectStreamTelemetry.flush()
@@ -69,7 +63,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate, @Ma
         let image = NSImage(systemSymbolName: "video.fill", accessibilityDescription: "CamBar")
         image?.isTemplate = true
         button.image = image
-        statusItem.expandedInterfaceDelegate = self
+        button.sendAction(on: [.leftMouseUp, .rightMouseUp])
+        button.target = self
+        button.action = #selector(handleStatusItemClick)
+    }
+
+    private func configureMainMenu() {
+        let mainMenu = NSMenu()
+        let appMenuItem = NSMenuItem()
+        let appMenu = NSMenu()
+        let quitItem = NSMenuItem(title: "Quit CamBar", action: #selector(quit), keyEquivalent: "q")
+        quitItem.target = self
+        appMenu.addItem(quitItem)
+        appMenuItem.submenu = appMenu
+        mainMenu.addItem(appMenuItem)
+        NSApp.mainMenu = mainMenu
     }
 
     private func configurePopover() {
@@ -89,14 +97,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate, @Ma
         )
     }
 
-    private func monitorOutsideClicks() {
+    private func startMonitoringOutsideClicks() {
+        guard outsideClickMonitor == nil else { return }
         outsideClickMonitor = NSEvent.addGlobalMonitorForEvents(
             matching: [.leftMouseDown, .rightMouseDown, .otherMouseDown]
-        ) { [weak self] _ in
+        ) { [weak self] event in
+            let timestamp = event.timestamp
             Task { @MainActor [weak self] in
-                self?.requestPopoverClose(reason: "outside_click")
+                self?.requestPopoverClose(reason: "outside_click", at: timestamp)
             }
         }
+    }
+
+    private func stopMonitoringOutsideClicks() {
+        guard let outsideClickMonitor else { return }
+        NSEvent.removeMonitor(outsideClickMonitor)
+        self.outsideClickMonitor = nil
     }
 
     private func relayStateDidChange(_ state: Go2RTCRelayController.State) {
@@ -108,13 +124,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate, @Ma
         case .starting, .warming:
             uiState.status = .connecting
         }
-        let relayAvailable = switch state {
+        relayAvailable = switch state {
         case .warming, .ready: true
         case .starting, .waitingToRetry, .stopped: false
         }
-        playbackController.setRelayState(available: relayAvailable, ready: state == .ready)
-        guard state == .ready else { return }
-        runReadyDebugHooksOnce()
+        relayReady = state == .ready
+        playbackController.setRelayState(available: relayAvailable, ready: relayReady)
+        windowController?.setRelayState(available: relayAvailable, ready: relayReady)
     }
 
     private func retry() {
@@ -124,86 +140,99 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate, @Ma
         }
     }
 
-    func statusItem(
-        _ statusItem: NSStatusItem,
-        didBegin expandedInterfaceSession: NSStatusItemExpandedInterfaceSession
-    ) {
-        wantsPopoverVisible = true
+    @objc private func handleStatusItemClick() {
+        guard let event = NSApp.currentEvent else { return }
+        if event.type == .rightMouseUp || event.modifierFlags.contains(.control) {
+            requestPopoverClose(reason: "status_context_menu", at: event.timestamp)
+            showStatusMenu(for: event)
+            return
+        }
+        let command = popoverPresentation.toggle(at: event.timestamp)
         DirectStreamTelemetry.record(
             component: "app",
-            event: "status_session_began",
+            event: "status_click",
             surface: "menu",
-            detail: "state=\(popoverState.rawValue)"
+            detail: "desired=\(popoverPresentation.wantsVisible) state=\(popoverPresentation.phase)"
         )
-        reconcilePopoverVisibility()
+        apply(command)
     }
 
-    func statusItemDidEndExpandedInterfaceSession(_ statusItem: NSStatusItem, animated: Bool) {
-        wantsPopoverVisible = false
-        DirectStreamTelemetry.record(
-            component: "app",
-            event: "status_session_ended",
-            surface: "menu",
-            detail: "state=\(popoverState.rawValue) animated=\(animated)"
+    private func showStatusMenu(for event: NSEvent) {
+        guard let button = statusItem.button else { return }
+        let menu = NSMenu()
+        let quitItem = NSMenuItem(title: "Quit CamBar", action: #selector(quit), keyEquivalent: "q")
+        quitItem.target = self
+        menu.addItem(quitItem)
+        NSMenu.popUpContextMenu(menu, with: event, for: button)
+    }
+
+    @objc private func quit() {
+        DirectStreamTelemetry.record(component: "app", event: "quit_requested")
+        NSApp.terminate(nil)
+    }
+
+    private func requestPopoverClose(reason: String, at timestamp: TimeInterval? = nil) {
+        let command = popoverPresentation.requestClose(
+            at: timestamp ?? NSApp.currentEvent?.timestamp ?? ProcessInfo.processInfo.systemUptime
         )
-        reconcilePopoverVisibility()
-    }
-
-    private func requestPopoverOpen() {
-        wantsPopoverVisible = true
-        reconcilePopoverVisibility()
-    }
-
-    private func requestPopoverClose(reason: String) {
-        guard wantsPopoverVisible || popoverState != .closed else { return }
         DirectStreamTelemetry.record(
             component: "app",
             event: "menu_close_requested",
             surface: "menu",
-            detail: "reason=\(reason) state=\(popoverState.rawValue)"
+            detail: "reason=\(reason) state=\(popoverPresentation.phase)"
         )
-        if let expandedInterfaceSession = statusItem.expandedInterfaceSession {
-            expandedInterfaceSession.cancel()
-            return
-        }
-        wantsPopoverVisible = false
-        reconcilePopoverVisibility()
+        apply(command)
     }
 
-    private func reconcilePopoverVisibility() {
-        switch (popoverState, wantsPopoverVisible) {
-        case (.closed, true):
+    private func apply(_ command: PopoverPresentationState.Command) {
+        switch command {
+        case .show:
             presentPopoverFromStatusItem()
-        case (.open, false):
-            popoverState = .closing
+        case .close:
             popover.performClose(nil)
-        case (.opening, _), (.closing, _), (.closed, false), (.open, true):
+        case .none:
             break
         }
     }
 
     private func presentPopoverFromStatusItem() {
-        guard let button = statusItem.button else { return }
-        guard popoverState == .closed, wantsPopoverVisible else { return }
-        popoverState = .opening
-        if windowController?.window?.isVisible == true {
+        guard let button = statusItem.button else {
+            popoverPresentation.presentationFailed()
+            return
+        }
+        if windowController != nil {
             windowController?.close()
         }
         let size = bestPopoverVideoSize(anchorButton: button)
         uiState.videoSize = size
         popover.contentSize = ContentView.contentSize(forVideoSize: size)
         DirectStreamTelemetry.record(component: "app", event: "menu_open_requested", surface: "menu")
-        NSApp.activate(ignoringOtherApps: true)
+        startMonitoringOutsideClicks()
         popover.show(relativeTo: button.bounds, of: button, preferredEdge: .maxY)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { [weak self] in
+            guard let self,
+                  self.popoverPresentation.phase == .opening else { return }
+            if self.popover.isShown {
+                DirectStreamTelemetry.record(component: "app", event: "menu_show_confirmed", surface: "menu")
+                self.apply(self.popoverPresentation.didShow())
+            } else {
+                DirectStreamTelemetry.record(component: "app", event: "menu_show_failed", surface: "menu")
+                self.popoverPresentation.presentationFailed()
+                self.stopMonitoringOutsideClicks()
+            }
+        }
     }
 
     private func openWindow() {
         DirectStreamTelemetry.record(component: "app", event: "window_open_requested", surface: "window")
+        playbackController.suspend()
         if windowController == nil {
             windowController = CameraWindowController(
-                playback: playbackController,
                 nativeVideoSize: nativeVideoSize,
+                relayAvailable: relayAvailable,
+                relayReady: relayReady,
                 onClose: { [weak self] in
+                    self?.playbackController.prewarm()
                     self?.windowController = nil
                 }
             )
@@ -226,65 +255,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate, @Ma
     }
 
     func popoverWillShow(_ notification: Notification) {
-        popoverState = .opening
         DirectStreamTelemetry.record(component: "app", event: "menu_will_show", surface: "menu")
-        playbackController.show(.menu)
+        playbackController.show()
     }
 
     func popoverDidShow(_ notification: Notification) {
-        popoverState = .open
         DirectStreamTelemetry.record(component: "app", event: "menu_did_show", surface: "menu")
-        reconcilePopoverVisibility()
+        apply(popoverPresentation.didShow())
     }
 
     func popoverWillClose(_ notification: Notification) {
-        popoverState = .closing
         DirectStreamTelemetry.record(component: "app", event: "menu_will_close", surface: "menu")
     }
 
     func popoverDidClose(_ notification: Notification) {
-        popoverState = .closed
         DirectStreamTelemetry.record(component: "app", event: "menu_closed", surface: "menu")
-        playbackController.hide(.menu)
-        if debugPopoverRemaining > 1 {
-            debugPopoverRemaining -= 1
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
-                self?.runNextDebugPopoverCycle()
-            }
-        } else if debugPopoverRemaining == 1 {
-            debugPopoverRemaining = 0
-        }
-        reconcilePopoverVisibility()
-    }
-
-    private func runReadyDebugHooksOnce() {
-        guard !didRunDebugHooks else { return }
-        didRunDebugHooks = true
-        if ProcessInfo.processInfo.environment["CAMBAR_OPEN_WINDOW"] == "1" {
-            DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in self?.openWindow() }
-        }
-    }
-
-    private func scheduleDebugPopoverHooks() {
-        let delay = TimeInterval(ProcessInfo.processInfo.environment["CAMBAR_DEBUG_POPOVER_START_DELAY_SECONDS"] ?? "1") ?? 1
-        if let value = ProcessInfo.processInfo.environment["CAMBAR_DEBUG_POPOVER_CYCLES"],
-           let cycles = Int(value), cycles > 0 {
-            popover.behavior = .applicationDefined
-            debugPopoverRemaining = cycles
-            debugPopoverVisibleSeconds = TimeInterval(ProcessInfo.processInfo.environment["CAMBAR_DEBUG_POPOVER_VISIBLE_SECONDS"] ?? "2") ?? 2
-            DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in self?.runNextDebugPopoverCycle() }
-        } else if ProcessInfo.processInfo.environment["CAMBAR_OPEN_POPOVER"] == "1" {
-            DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in self?.requestPopoverOpen() }
-        }
-    }
-
-    private func runNextDebugPopoverCycle() {
-        guard debugPopoverRemaining > 0 else { return }
-        DirectStreamTelemetry.record(component: "app", event: "debug_popover_cycle", surface: "menu")
-        requestPopoverOpen()
-        guard debugPopoverRemaining > 1 else { return }
-        DispatchQueue.main.asyncAfter(deadline: .now() + debugPopoverVisibleSeconds) { [weak self] in
-            self?.requestPopoverClose(reason: "debug_cycle")
-        }
+        stopMonitoringOutsideClicks()
+        playbackController.hide()
+        apply(popoverPresentation.didClose())
     }
 }

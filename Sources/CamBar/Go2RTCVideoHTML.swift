@@ -85,6 +85,7 @@ extension CameraPlaybackController {
 
               function noteFrame(presentedFrames) {
                 lastFrameAt = performance.now();
+                if (stallReported) emit('frame_resumed');
                 stallReported = false;
                 if (!sawFirstFrame && video.videoWidth > 0 && video.videoHeight > 0) {
                   sawFirstFrame = true;
@@ -110,27 +111,6 @@ extension CameraPlaybackController {
                 setTimeout(sampleFrame, 0);
               }
 
-              function frameCount() {
-                try {
-                  return video.getVideoPlaybackQuality().totalVideoFrames;
-                } catch (_) {
-                  return null;
-                }
-              }
-
-              function probeVisibleFrames(token, baseline, deadline) {
-                if (!pendingOpen || pendingOpen.token !== token) return;
-                const current = frameCount();
-                if (current !== null && baseline !== null && current > baseline) {
-                  noteFrame(current);
-                  completeOpen(token, {presentedFrames: current, source: 'frame_counter'});
-                  return;
-                }
-                if (performance.now() < deadline) {
-                  requestAnimationFrame(() => probeVisibleFrames(token, baseline, deadline));
-                }
-              }
-
               const onFrame = (_now, metadata) => {
                 noteFrame(metadata.presentedFrames);
                 if (pendingOpen) {
@@ -145,12 +125,8 @@ extension CameraPlaybackController {
               video.requestVideoFrameCallback(onFrame);
 
               window.__cambarMarkOpen = token => {
-                const baseline = frameCount();
                 pendingOpen = {token, startedAt: performance.now()};
                 video.play().catch(() => {});
-                requestAnimationFrame(() => {
-                  probeVisibleFrames(token, baseline, performance.now() + 1000);
-                });
               };
             }
 
@@ -187,6 +163,9 @@ extension CameraPlaybackController {
               pendingOpen = null;
               try { player.ondisconnect(); } catch (_) {}
               try { player.remove(); } catch (_) {}
+            };
+            window.__cambarResume = () => {
+              player.video && player.video.play().catch(() => {});
             };
           </script>
         </body>

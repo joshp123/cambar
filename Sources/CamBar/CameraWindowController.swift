@@ -8,10 +8,12 @@ final class CameraWindowController: NSWindowController, NSWindowDelegate {
     private var isPresentingCamera = false
 
     init(
-        playback: CameraPlaybackController,
         nativeVideoSize: CGSize,
+        relayAvailable: Bool,
+        relayReady: Bool,
         onClose: @escaping () -> Void = {}
     ) {
+        let playback = CameraPlaybackController(surface: .window, cornerStyle: .square)
         self.playback = playback
         self.onClose = onClose
         let hosting = NSHostingController(rootView: CameraWindowView(playback: playback))
@@ -26,6 +28,7 @@ final class CameraWindowController: NSWindowController, NSWindowDelegate {
         window.isReleasedWhenClosed = false
         super.init(window: window)
         window.delegate = self
+        playback.setRelayState(available: relayAvailable, ready: relayReady)
     }
 
     @available(*, unavailable)
@@ -39,8 +42,17 @@ final class CameraWindowController: NSWindowController, NSWindowDelegate {
         setCameraVisible(true)
     }
 
+    func setRelayState(available: Bool, ready: Bool) {
+        playback.setRelayState(available: available, ready: ready)
+    }
+
+    func shutdown() {
+        playback.shutdown()
+    }
+
     func windowWillClose(_ notification: Notification) {
         setCameraVisible(false)
+        playback.shutdown()
         onClose()
     }
 
@@ -65,9 +77,9 @@ final class CameraWindowController: NSWindowController, NSWindowDelegate {
         guard visible != isPresentingCamera else { return }
         isPresentingCamera = visible
         if visible {
-            playback.show(.window)
+            playback.show()
         } else {
-            playback.hide(.window)
+            playback.suspend()
         }
     }
 }
@@ -76,7 +88,7 @@ struct CameraWindowView: View {
     let playback: CameraPlaybackController
 
     var body: some View {
-        CameraVideoView(playback: playback, surface: .window, cornerStyle: .square)
+        CameraVideoView(playback: playback)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .background(Color.black)
     }
