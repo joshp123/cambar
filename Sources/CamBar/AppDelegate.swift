@@ -14,6 +14,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         cornerStyle: .containerConcentric
     )
     private var windowController: CameraWindowController?
+    private var previousFrontmostApplication: NSRunningApplication?
     private var workspaceObservers: [NSObjectProtocol] = []
     private var smokeControlObserver: NSObjectProtocol?
     private var outsideClickMonitor: Any?
@@ -330,6 +331,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     private func openWindow() {
         DirectStreamTelemetry.record(component: "app", event: "window_open_requested", surface: "window")
         playbackController.suspend()
+        let currentApplication = NSRunningApplication.current
+        if let frontmost = NSWorkspace.shared.frontmostApplication,
+           frontmost.processIdentifier != currentApplication.processIdentifier {
+            previousFrontmostApplication = frontmost
+        } else {
+            previousFrontmostApplication = nil
+        }
         if windowController == nil {
             windowController = CameraWindowController(
                 stream: streamController,
@@ -337,12 +345,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
                 onClose: { [weak self] in
                     self?.playbackController.resumeAfterPopout()
                     self?.windowController = nil
+                    self?.restorePreviousApplication()
                 }
             )
         }
-        NSApp.activate(ignoringOtherApps: true)
+        NSApp.activate()
         windowController?.present()
         requestPopoverClose(reason: "window_opened")
+    }
+
+    private func restorePreviousApplication() {
+        defer { previousFrontmostApplication = nil }
+        guard NSApp.isActive,
+              let previousFrontmostApplication,
+              !previousFrontmostApplication.isTerminated else { return }
+
+        NSApp.yieldActivation(to: previousFrontmostApplication)
+        let restored = previousFrontmostApplication.activate(
+            from: NSRunningApplication.current,
+            options: []
+        )
+        DirectStreamTelemetry.record(
+            component: "app",
+            event: "activation_restored",
+            detail: "success=\(restored)"
+        )
     }
 
     private func bestPopoverVideoSize(anchorButton: NSStatusBarButton?) -> NSSize {

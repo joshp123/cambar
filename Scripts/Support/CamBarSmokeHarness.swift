@@ -70,6 +70,21 @@ private func assertCamBarIsNotFrontmost(_ context: String) throws {
     }
 }
 
+private func waitForFrontmostApplication(
+    processIdentifier: pid_t,
+    timeout: TimeInterval,
+    context: String
+) throws {
+    let deadline = Date().addingTimeInterval(timeout)
+    repeat {
+        if NSWorkspace.shared.frontmostApplication?.processIdentifier == processIdentifier {
+            return
+        }
+        RunLoop.current.run(until: Date().addingTimeInterval(0.05))
+    } while Date() < deadline
+    throw SmokeError.message("original application did not regain focus \(context)")
+}
+
 private struct TelemetryEvent: Decodable {
     let schemaVersion: Int?
     let sequence: Int?
@@ -1033,6 +1048,10 @@ private func run() throws {
         identifier: "com.cambar.open-window",
         timeout: 2
     )
+    guard let applicationBeforePopout = NSWorkspace.shared.frontmostApplication,
+          applicationBeforePopout.bundleIdentifier != appBundleIdentifier else {
+        throw SmokeError.message("no non-CamBar frontmost application before popout")
+    }
     try driver.press(identifier: "com.cambar.open-window")
     let windowRequested = try telemetry.waitForEvent(
         "window_open_requested",
@@ -1065,6 +1084,20 @@ private func run() throws {
         component: "app",
         surface: "window",
         afterUptimeMilliseconds: windowRequested.uptimeMilliseconds
+    )
+    let restoration = try telemetry.waitForEvent(
+        "activation_restored",
+        timeout: 2,
+        component: "app",
+        afterUptimeMilliseconds: windowRequested.uptimeMilliseconds
+    )
+    guard restoration.detail == "success=true" else {
+        throw SmokeError.message("focus restoration was not accepted by macOS")
+    }
+    try waitForFrontmostApplication(
+        processIdentifier: applicationBeforePopout.processIdentifier,
+        timeout: 2,
+        context: "after popout close"
     )
     try telemetry.assertNoFailures(expectedActivations: 1)
     print("PASS: native popout displayed non-black video and closed")
