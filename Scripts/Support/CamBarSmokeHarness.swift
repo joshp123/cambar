@@ -197,7 +197,7 @@ private final class TelemetryReader {
         return result
     }
 
-    func assertNoFailures() throws {
+    func assertNoFailures(expectedActivations: Int = 0) throws {
         for forbidden in [
             "session_reconnecting",
             "stream_stalled",
@@ -214,8 +214,10 @@ private final class TelemetryReader {
             }
         }
         let activations = try count("app_activated", component: "app")
-        guard activations == 0 else {
-            throw SmokeError.message("telemetry recorded \(activations) CamBar activation event(s)")
+        guard activations == expectedActivations else {
+            throw SmokeError.message(
+                "expected \(expectedActivations) CamBar activation event(s), recorded \(activations)"
+            )
         }
     }
 
@@ -680,7 +682,8 @@ private func assertExactCounts(
     statusClicks: Int,
     presentationRequests: Int,
     playbackOpens: Int,
-    closes: Int
+    closes: Int,
+    expectedActivations: Int
 ) throws {
     let expectations: [(String, Int)] = [
         ("status_click", statusClicks),
@@ -705,7 +708,7 @@ private func assertExactCounts(
     guard sessionsStopped == 0 else {
         throw SmokeError.message("app-owned stream stopped \(sessionsStopped) time(s)")
     }
-    try telemetry.assertNoFailures()
+    try telemetry.assertNoFailures(expectedActivations: expectedActivations)
 }
 
 private func requireOpenEvent(
@@ -1038,6 +1041,12 @@ private func run() throws {
         surface: "window",
         afterUptimeMilliseconds: popoutMenuClick.uptimeMilliseconds
     )
+    try telemetry.waitForCount(
+        "app_activated",
+        count: 1,
+        timeout: 2,
+        component: "app"
+    )
     _ = try telemetry.waitForEvent(
         "live_view",
         timeout: 3,
@@ -1057,7 +1066,7 @@ private func run() throws {
         surface: "window",
         afterUptimeMilliseconds: windowRequested.uptimeMilliseconds
     )
-    try telemetry.assertNoFailures()
+    try telemetry.assertNoFailures(expectedActivations: 1)
     print("PASS: native popout displayed non-black video and closed")
 
     for cycle in 1...totalOpenCycles {
@@ -1083,7 +1092,7 @@ private func run() throws {
         )
         let openID = warmOpen.openID
         warmOpenLatencies.append(warmOpen.elapsedMilliseconds)
-        try telemetry.assertNoFailures()
+        try telemetry.assertNoFailures(expectedActivations: 1)
         try assertCamBarIsNotFrontmost("after \(phase) open")
         try capturePopoverScreenshot(
             processIdentifier: application.processIdentifier,
@@ -1115,7 +1124,7 @@ private func run() throws {
             openID: openID,
             afterUptimeMilliseconds: closeClick.uptimeMilliseconds
         )
-        try telemetry.assertNoFailures()
+        try telemetry.assertNoFailures(expectedActivations: 1)
         try ownership.assertNoChildProcesses()
         try assertCamBarIsNotFrontmost("after \(phase) close")
         print("PASS: \(phase) open/live-frame/close")
@@ -1161,7 +1170,7 @@ private func run() throws {
     ).isEmpty else {
         throw SmokeError.message("open-close-during-opening burst incorrectly started playback")
     }
-    try telemetry.assertNoFailures()
+    try telemetry.assertNoFailures(expectedActivations: 1)
     try assertCamBarIsNotFrontmost("after open-close-during-opening burst")
 
     let raceOpenClickCount = try telemetry.count("status_click", component: "app", surface: "menu")
@@ -1257,7 +1266,7 @@ private func run() throws {
         openID: reopenedID,
         afterUptimeMilliseconds: finalCloseClick.uptimeMilliseconds
     )
-    try telemetry.assertNoFailures()
+    try telemetry.assertNoFailures(expectedActivations: 1)
     try assertCamBarIsNotFrontmost("after lifecycle bursts")
 
     try assertExactCounts(
@@ -1265,7 +1274,8 @@ private func run() throws {
         statusClicks: totalOpenCycles * 2 + 9,
         presentationRequests: totalOpenCycles + 5,
         playbackOpens: totalOpenCycles + 4,
-        closes: totalOpenCycles + 5
+        closes: totalOpenCycles + 5,
+        expectedActivations: 1
     )
     let observedGenerations = Set(try telemetry.events().compactMap(\.videoSessionID))
     guard observedGenerations == Set([streamGeneration]) else {
