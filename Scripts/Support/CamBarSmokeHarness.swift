@@ -243,6 +243,10 @@ private final class TelemetryReader {
         if !contents.hasSuffix("\n"), !lines.isEmpty {
             lines.removeLast()
         }
+        if let sessionID {
+            let sessionField = Substring("\"session_id\":\"\(sessionID)\"")
+            lines = lines.filter { $0.contains(sessionField) }
+        }
         return try lines.enumerated().compactMap { index, line in
             do {
                 let data = Data(line.utf8)
