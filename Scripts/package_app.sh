@@ -25,12 +25,32 @@ if [[ ${#ARCH_LIST[@]} -eq 0 ]]; then
   ARCH_LIST=("$HOST_ARCH")
 fi
 
+GO2RTC_SOURCE=$(command -v go2rtc || true)
+if [[ ! -x "$GO2RTC_SOURCE" ]]; then
+  echo "ERROR: go2rtc not found on PATH. Enter devenv shell or run: nix shell nixpkgs#go2rtc -c Scripts/package_app.sh" >&2
+  exit 1
+fi
+
+BUILD_PRODUCT_DIRS=()
+STAGED_PRODUCT_ROOT="$ROOT/.build/cambar-package/$CONF"
 for ARCH in "${ARCH_LIST[@]}"; do
   swift build -c "$CONF" --arch "$ARCH"
+  PRODUCT_DIR=$(swift build -c "$CONF" --arch "$ARCH" --show-bin-path)
+  PRODUCT="$PRODUCT_DIR/$APP_NAME"
+  if [[ ! -x "$PRODUCT" ]]; then
+    echo "ERROR: Missing ${APP_NAME} build for ${ARCH} at ${PRODUCT}" >&2
+    exit 1
+  fi
+  STAGED_ARCH_DIR="$STAGED_PRODUCT_ROOT/$ARCH"
+  mkdir -p "$STAGED_ARCH_DIR"
+  cp "$PRODUCT" "$STAGED_ARCH_DIR/$APP_NAME"
+  BUILD_PRODUCT_DIRS+=("$PRODUCT_DIR")
 done
 
 APP="$ROOT/${APP_NAME}.app"
-rm -rf "$APP"
+if [[ -e "$APP" ]]; then
+  trash "$APP"
+fi
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources" "$APP/Contents/Frameworks"
 
 # Convert Icon.icon to Icon.icns if present (requires iconutil).
@@ -79,10 +99,7 @@ PLIST
 build_product_path() {
   local name="$1"
   local arch="$2"
-  case "$arch" in
-    arm64|x86_64) echo ".build/${arch}-apple-macosx/$CONF/$name" ;;
-    *) echo ".build/$CONF/$name" ;;
-  esac
+  echo "$STAGED_PRODUCT_ROOT/$arch/$name"
 }
 
 verify_binary_arches() {
@@ -136,7 +153,7 @@ if [[ -d "$APP_RESOURCES_DIR" ]]; then
 fi
 
 # SwiftPM resource bundles are emitted next to the built binary.
-PREFERRED_BUILD_DIR="$(dirname "$(build_product_path "$APP_NAME" "${ARCH_LIST[0]}")")"
+PREFERRED_BUILD_DIR="${BUILD_PRODUCT_DIRS[0]}"
 shopt -s nullglob
 SWIFTPM_BUNDLES=("${PREFERRED_BUILD_DIR}/"*.bundle)
 shopt -u nullglob
@@ -147,7 +164,7 @@ if [[ ${#SWIFTPM_BUNDLES[@]} -gt 0 ]]; then
 fi
 
 # Embed frameworks if any exist in the build folder.
-FRAMEWORK_DIRS=(".build/$CONF" ".build/${ARCH_LIST[0]}-apple-macosx/$CONF")
+FRAMEWORK_DIRS=("${BUILD_PRODUCT_DIRS[0]}")
 for dir in "${FRAMEWORK_DIRS[@]}"; do
   if compgen -G "${dir}/*.framework" >/dev/null; then
     cp -R "${dir}/"*.framework "$APP/Contents/Frameworks/"
@@ -166,11 +183,7 @@ fi
 # outside the repo's devenv/Nix shell.
 BUNDLE_BIN_DIR="$APP/Contents/Resources/bin"
 mkdir -p "$BUNDLE_BIN_DIR"
-if ! command -v go2rtc >/dev/null 2>&1; then
-  echo "ERROR: go2rtc not found on PATH. Enter devenv shell or run: nix shell nixpkgs#go2rtc -c Scripts/package_app.sh" >&2
-  exit 1
-fi
-cp "$(command -v go2rtc)" "$BUNDLE_BIN_DIR/go2rtc"
+cp "$GO2RTC_SOURCE" "$BUNDLE_BIN_DIR/go2rtc"
 chmod +x "$BUNDLE_BIN_DIR/go2rtc"
 
 if command -v camsnap >/dev/null 2>&1; then
@@ -183,7 +196,9 @@ chmod -R u+w "$APP"
 
 # Strip extended attributes to prevent AppleDouble files that break code sealing.
 xattr -cr "$APP"
-find "$APP" -name '._*' -delete
+while IFS= read -r -d '' APPLEDOUBLE_FILE; do
+  trash "$APPLEDOUBLE_FILE"
+done < <(find "$APP" -name '._*' -print0)
 
 ENTITLEMENTS_DIR="$ROOT/.build/entitlements"
 DEFAULT_ENTITLEMENTS="$ENTITLEMENTS_DIR/${APP_NAME}.entitlements"

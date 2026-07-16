@@ -27,6 +27,8 @@ for arg in "$@"; do
   esac
 done
 
+command -v go2rtc >/dev/null 2>&1 || fail "go2rtc not found on PATH; refusing to stop the working app before packaging can succeed."
+
 log "==> Killing existing ${APP_NAME} instances"
 pkill -f "${APP_PROCESS_PATTERN}" 2>/dev/null || true
 pkill -f "${DEBUG_PROCESS_PATTERN}" 2>/dev/null || true
