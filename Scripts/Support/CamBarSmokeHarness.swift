@@ -15,7 +15,8 @@ private struct Options {
         case physical
     }
 
-    var warmCycles = 3
+    var reopenCycles = 3
+    var firstOpenIdleSeconds: TimeInterval = 35
     var inputMode = InputMode.accessibility
     var screenshotPath = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
         .appendingPathComponent(".build/smoke-ui-popover.png").path
@@ -26,11 +27,11 @@ private struct Options {
         while !arguments.isEmpty {
             let argument = arguments.removeFirst()
             switch argument {
-            case "--warm-cycles":
+            case "--reopen-cycles":
                 guard let value = arguments.first, let count = Int(value), count >= 1 else {
-                    throw SmokeError.message("--warm-cycles requires an integer of at least 1")
+                    throw SmokeError.message("--reopen-cycles requires an integer of at least 1")
                 }
-                result.warmCycles = count
+                result.reopenCycles = count
                 arguments.removeFirst()
             case "--screenshot":
                 guard let value = arguments.first, !value.isEmpty else {
@@ -38,10 +39,18 @@ private struct Options {
                 }
                 result.screenshotPath = NSString(string: value).expandingTildeInPath
                 arguments.removeFirst()
+            case "--first-open-idle":
+                guard let value = arguments.first,
+                      let seconds = TimeInterval(value),
+                      seconds >= 0 else {
+                    throw SmokeError.message("--first-open-idle requires a non-negative number of seconds")
+                }
+                result.firstOpenIdleSeconds = seconds
+                arguments.removeFirst()
             case "--physical-clicks":
                 result.inputMode = .physical
             case "-h", "--help":
-                print("Usage: smoke_ui.sh [--warm-cycles COUNT] [--screenshot PATH] [--physical-clicks]")
+                print("Usage: smoke_ui.sh [--reopen-cycles COUNT] [--first-open-idle SECONDS] [--screenshot PATH] [--physical-clicks]")
                 exit(0)
             default:
                 throw SmokeError.message("unknown argument: \(argument)")
@@ -141,6 +150,10 @@ private final class TelemetryReader {
         let activations = try count("app_activated", component: "app")
         guard activations == 0 else {
             throw SmokeError.message("telemetry recorded \(activations) CamBar activation event(s)")
+        }
+        let relayRetries = try count("waiting_to_retry", component: "relay")
+        guard relayRetries == 0 else {
+            throw SmokeError.message("telemetry recorded \(relayRetries) relay retry event(s)")
         }
     }
 
@@ -538,9 +551,11 @@ private func assertExactCounts(
         ("status_click", opens + closes),
         ("menu_open_requested", opens),
         ("presentation_started", opens),
+        ("session_started", opens),
         ("live_view", opens),
         ("frame_sample", opens),
         ("menu_closed", closes),
+        ("session_stopped", closes),
     ]
     for (event, expected) in expectations {
         let actual = try telemetry.count(event, surface: "menu")
@@ -586,14 +601,26 @@ private func run() throws {
     try ownership.registerApp(application)
     try ownership.waitForHelper(timeout: 10)
     try telemetry.waitForLaunch(excluding: previousTelemetrySession, timeout: 10)
+    try telemetry.waitForCount("ready", count: 1, timeout: 12, component: "relay")
     try assertCamBarIsNotFrontmost("after background launch")
 
     let driver = StatusItemDriver(processIdentifier: application.processIdentifier)
     let statusFrame = try driver.waitForFrame(timeout: 10)
-    let totalOpenCycles = 1 + options.warmCycles
+    let totalOpenCycles = 1 + options.reopenCycles
+
+    if options.firstOpenIdleSeconds > 0 {
+        RunLoop.current.run(until: Date().addingTimeInterval(options.firstOpenIdleSeconds))
+    }
+    let hiddenSessions = try telemetry.count("session_started", surface: "menu")
+    guard hiddenSessions == 0 else {
+        throw SmokeError.message(
+            "menu created \(hiddenSessions) hidden video session(s) before the first open"
+        )
+    }
+    try assertCamBarIsNotFrontmost("after first-open idle")
 
     for cycle in 1...totalOpenCycles {
-        let phase = cycle == 1 ? "cold" : "warm \(cycle - 1)/\(options.warmCycles)"
+        let phase = cycle == 1 ? "idle first open" : "reopen \(cycle - 1)/\(options.reopenCycles)"
         let statusClicksBeforeOpen = try telemetry.count("status_click", surface: "menu")
         try driver.click(frame: statusFrame, inputMode: options.inputMode)
         try telemetry.waitForCount(
@@ -622,6 +649,7 @@ private func run() throws {
             surface: "menu"
         )
         try telemetry.waitForCount("menu_closed", count: cycle, timeout: 3, surface: "menu")
+        try telemetry.waitForCount("session_stopped", count: cycle, timeout: 3, surface: "menu")
         try telemetry.assertNoFailures()
         try ownership.refreshHelpers()
         try assertCamBarIsNotFrontmost("after \(phase) close")

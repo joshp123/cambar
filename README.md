@@ -21,7 +21,7 @@ written_by: ai
 
 ## What it does
 
-CamBar reads your RTSP URL from `CAMBAR_RTSP_URL` or `~/.config/camsnap/config.yaml`, starts bundled `go2rtc`, warms the main camera stream at launch/login, and shows that already-running stream in the menu bar. Normal playback does not use `ffmpeg`, HLS files, or AVPlayer.
+CamBar reads your RTSP URL from `CAMBAR_RTSP_URL` or `~/.config/camsnap/config.yaml`, starts bundled `go2rtc`, and keeps the main RTSP producer connected at launch/login. Opening the menu creates one visible WebRTC player; closing it destroys that player. Normal playback does not use `ffmpeg`, HLS files, or AVPlayer.
 
 ## Why
 
@@ -30,9 +30,9 @@ I wanted to know when the postman is at the door. The vendor app for this camera
 ## First run
 
 - Install CamBar at `~/Applications/CamBar.app`, then launch it once.
-- Open the menubar popover after the stream has warmed.
+- Open the menubar popover after the relay reports ready.
 - Set `CAMBAR_RTSP_URL` if you want to override camera discovery.
-- The stream should already be live when the popover opens.
+- First-frame latency depends on WebRTC setup and the camera's keyframe interval.
 - macOS may show CamBar under System Settings -> General -> Login Items if approval is needed.
 
 ## Requirements
@@ -128,13 +128,14 @@ Repo: CamBar
 What the app does:
 - Menubar popover with live feed
 - Optional full-size window
-- Bundles go2rtc and prewarms the main RTSP stream at app launch/login
-- Renders the warmed stream directly; no normal-path ffmpeg/HLS/AVPlayer
+- Bundles go2rtc and keeps the main RTSP producer connected at app launch/login
+- Creates playback only while a camera surface is visible; no hidden decoder
+- Uses direct WebRTC playback; no normal-path ffmpeg/HLS/AVPlayer
 
 What I need you to do:
 1) Build, test and stage the app
 2) Set CAMBAR_RTSP_URL (or verify camsnap config)
-3) Verify warm menu open is effectively instant
+3) Test a first open after the app has idled and several open/close cycles
 4) Ensure no credentials are committed
 
 Notes:

@@ -40,6 +40,7 @@ extension CameraPlaybackController {
             let lastFrameAt = performance.now();
             let stallReported = false;
             let stallTimer = null;
+            const observedPeers = new WeakSet();
 
             function emit(event, values = {}) {
               try {
@@ -51,6 +52,36 @@ extension CameraPlaybackController {
                 });
               } catch (_) {}
             }
+
+            function emitPeerState(state) {
+              if (!state) return;
+              emit('webrtc_' + state);
+            }
+
+            function observePeerConnection(peer) {
+              if (observedPeers.has(peer)) return;
+              observedPeers.add(peer);
+              emit('webrtc_negotiating');
+              peer.addEventListener('connectionstatechange', () => {
+                emitPeerState(peer.connectionState);
+              });
+            }
+
+            const nativeSetRemoteDescription = RTCPeerConnection.prototype.setRemoteDescription;
+            RTCPeerConnection.prototype.setRemoteDescription = function(...args) {
+              observePeerConnection(this);
+              emit('webrtc_remote_description');
+              return nativeSetRemoteDescription.apply(this, args);
+            };
+
+            const nativeSetLocalDescription = RTCPeerConnection.prototype.setLocalDescription;
+            RTCPeerConnection.prototype.setLocalDescription = function(...args) {
+              observePeerConnection(this);
+              emit('webrtc_local_description');
+              return nativeSetLocalDescription.apply(this, args);
+            };
+
+            emit('page_ready');
 
             function watchFrames(video) {
               function sampleFrame() {
