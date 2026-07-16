@@ -97,8 +97,12 @@ final class Go2RTCRelayController {
                 if await waitForCurrentVideo(timeout: 8) {
                     guard !Task.isCancelled, expectedGeneration == generation else { return }
                     state = .ready
-                    recoveryTask = nil
-                    return
+                    failureCount = 0
+                    let failure = await waitForRuntimeFailure(generation: expectedGeneration)
+                    guard !Task.isCancelled, expectedGeneration == generation else { return }
+                    terminateProcess()
+                    await scheduleRetry(after: failure, failureCount: &failureCount)
+                    continue
                 }
             case let .failure(failure):
                 await scheduleRetry(after: failure, failureCount: &failureCount)
@@ -215,6 +219,27 @@ final class Go2RTCRelayController {
             return nil
         }
         return RelayStreamSample.decode(data)
+    }
+
+    private func waitForRuntimeFailure(generation expectedGeneration: Int) async -> Failure {
+        var previousSample: RelayStreamSample?
+        var lastProgress = ProcessInfo.processInfo.systemUptime
+
+        while !Task.isCancelled, expectedGeneration == generation {
+            guard let runningProcess = process else { return .cameraUnavailable }
+            guard runningProcess.isRunning else { return .processExited(runningProcess.terminationStatus) }
+            if let sample = await streamSample() {
+                if let previousSample, sample.isAdvancing(from: previousSample) {
+                    lastProgress = ProcessInfo.processInfo.systemUptime
+                }
+                previousSample = sample
+            }
+            if ProcessInfo.processInfo.systemUptime - lastProgress >= 5 {
+                return .cameraUnavailable
+            }
+            try? await Task.sleep(for: .seconds(1))
+        }
+        return .cameraUnavailable
     }
 
     private func processDidTerminate(_ terminatedProcess: Process) {
