@@ -12,7 +12,9 @@ APP_NAME=CamBar
 BUNDLE_ID=com.cambar
 ARCH=${ARCHES:-$(uname -m)}
 APP_IDENTITY=${APP_IDENTITY:-}
+EXPECTED_TEAM_ID=7M8BR7R488
 source "$ROOT/version.env"
+BUILD_NUMBER=$(git rev-list --count HEAD)
 
 if [[ "$ARCH" == *" "* ]]; then
   echo "ERROR: CamBar packaging supports one architecture at a time." >&2
@@ -43,12 +45,8 @@ fi
 
 STAGING_ROOT="$ROOT/.build/package"
 STAGED_APP="$STAGING_ROOT/$APP_NAME.app-staging"
+BUILT_APP="$STAGING_ROOT/$APP_NAME.app"
 APP="$HOME/Applications/$APP_NAME.app"
-mkdir -p "$HOME/Applications"
-if pgrep -f "$APP/Contents/MacOS/$APP_NAME" >/dev/null; then
-  echo "ERROR: Quit CamBar before replacing its signed bundle." >&2
-  exit 1
-fi
 EXISTING_TEAM_ID=""
 if [[ -e "$APP" ]]; then
   EXISTING_TEAM_ID=$(codesign -dv --verbose=4 "$APP" 2>&1 | awk -F= '/^TeamIdentifier=/ { print $2; exit }')
@@ -64,6 +62,9 @@ chmod +x "$STAGED_APP/Contents/MacOS/$APP_NAME" "$STAGED_APP/Contents/Resources/
 
 BUILD_TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 GIT_COMMIT=$(git rev-parse --short HEAD 2>/dev/null || echo "unknown")
+if [[ -n "$(git status --porcelain --untracked-files=all)" ]]; then
+  GIT_COMMIT="${GIT_COMMIT}-dirty"
+fi
 cat > "$STAGED_APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -102,15 +103,18 @@ codesign "${SIGN_ARGS[@]}" "$STAGED_APP/Contents/Resources/bin/go2rtc"
 codesign "${SIGN_ARGS[@]}" "$STAGED_APP"
 codesign --verify --deep --strict "$STAGED_APP"
 STAGED_TEAM_ID=$(codesign -dv --verbose=4 "$STAGED_APP" 2>&1 | awk -F= '/^TeamIdentifier=/ { print $2; exit }')
+if [[ "$STAGED_TEAM_ID" != "$EXPECTED_TEAM_ID" ]]; then
+  echo "ERROR: signing team $STAGED_TEAM_ID does not match expected team $EXPECTED_TEAM_ID." >&2
+  exit 1
+fi
 if [[ -n "$EXISTING_TEAM_ID" && "$STAGED_TEAM_ID" != "$EXISTING_TEAM_ID" ]]; then
   echo "ERROR: signing team changed from $EXISTING_TEAM_ID to $STAGED_TEAM_ID; preserving Local Network permission identity." >&2
   exit 1
 fi
 
-if [[ -e "$APP" ]]; then
-  ditto "$STAGED_APP" "$APP"
-else
-  mv "$STAGED_APP" "$APP"
+if [[ -e "$BUILT_APP" ]]; then
+  trash "$BUILT_APP"
 fi
-codesign --verify --deep --strict "$APP"
-echo "Created $APP"
+mv "$STAGED_APP" "$BUILT_APP"
+codesign --verify --deep --strict "$BUILT_APP"
+echo "Built $BUILT_APP"

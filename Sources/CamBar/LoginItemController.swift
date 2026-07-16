@@ -4,8 +4,18 @@ import ServiceManagement
 
 @MainActor
 final class LoginItemController {
+    private let attemptedRegistrationKey = "didAttemptLoginItemRegistration"
+
     func ensureRegistered() {
-        guard Bundle.main.bundleURL.pathExtension == "app" else {
+        let canonicalURL = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Applications/CamBar.app")
+            .resolvingSymlinksInPath()
+            .standardizedFileURL
+        let runningURL = Bundle.main.bundleURL
+            .resolvingSymlinksInPath()
+            .standardizedFileURL
+        guard runningURL == canonicalURL else {
+            DirectStreamTelemetry.record(component: "login_item", event: "skipped_noncanonical_bundle")
             return
         }
 
@@ -14,15 +24,17 @@ final class LoginItemController {
         case .enabled:
             DirectStreamTelemetry.record(component: "login_item", event: "enabled")
             return
-        case .notRegistered:
-            DirectStreamTelemetry.record(component: "login_item", event: "registering")
+        case .notRegistered, .notFound:
+            guard !UserDefaults.standard.bool(forKey: attemptedRegistrationKey) else {
+                DirectStreamTelemetry.record(component: "login_item", event: "not_registered")
+                return
+            }
+            UserDefaults.standard.set(true, forKey: attemptedRegistrationKey)
+            DirectStreamTelemetry.record(component: "login_item", event: "registering_once")
             register(service)
         case .requiresApproval:
             DirectStreamTelemetry.record(component: "login_item", event: "requires_approval")
             NSLog("CamBar login item requires approval in System Settings > General > Login Items.")
-        case .notFound:
-            DirectStreamTelemetry.record(component: "login_item", event: "repairing_registration")
-            register(service)
         @unknown default:
             DirectStreamTelemetry.record(component: "login_item", event: "unknown_status")
             NSLog("CamBar login item registration has an unknown status.")
