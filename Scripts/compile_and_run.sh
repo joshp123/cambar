@@ -2,6 +2,9 @@
 # Kill running instances, package, relaunch, verify.
 set -euo pipefail
 
+unset SDKROOT DEVELOPER_DIR NIX_CFLAGS_COMPILE NIX_LDFLAGS
+export DEVELOPER_DIR="$(/usr/bin/xcode-select -p)"
+
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 APP_NAME=CamBar
 APP_BUNDLE="${HOME}/Applications/${APP_NAME}.app"
@@ -24,14 +27,14 @@ done
 
 command -v go2rtc >/dev/null 2>&1 || fail "go2rtc not found on PATH; refusing to stop the working app before packaging can succeed."
 
-log "==> Killing existing ${APP_NAME} instances"
-pkill -f "${APP_PROCESS_PATTERN}" 2>/dev/null || true
-pkill -f "${GO2RTC_APP_PATTERN}" 2>/dev/null || true
-
 if [[ "${RUN_TESTS}" == "1" ]]; then
   log "==> swift test"
   swift test -q
 fi
+
+log "==> Killing existing ${APP_NAME} instances"
+pkill -f "${APP_PROCESS_PATTERN}" 2>/dev/null || true
+pkill -f "${GO2RTC_APP_PATTERN}" 2>/dev/null || true
 
 log "==> package app"
 "${ROOT_DIR}/Scripts/package_app.sh" release

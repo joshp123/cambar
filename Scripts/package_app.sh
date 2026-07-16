@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+unset SDKROOT DEVELOPER_DIR NIX_CFLAGS_COMPILE NIX_LDFLAGS
+export DEVELOPER_DIR="$(/usr/bin/xcode-select -p)"
+
 CONF=${1:-release}
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 cd "$ROOT"
