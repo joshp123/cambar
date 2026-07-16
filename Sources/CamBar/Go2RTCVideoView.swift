@@ -102,7 +102,9 @@ final class CameraPlaybackController: NSObject, WKNavigationDelegate, WKScriptMe
         guard let openToken else { return }
         container.showCover(true)
         requestFreshOpenFrame(token: openToken)
-        startOpenWatchdog(token: openToken)
+        if session.hasFrame {
+            startOpenWatchdog(token: openToken)
+        }
     }
 
     func hide(_ surface: Surface) {
@@ -157,24 +159,15 @@ final class CameraPlaybackController: NSObject, WKNavigationDelegate, WKScriptMe
             restartCount = 0
             startupWatchdog?.cancel()
             startupWatchdog = nil
-        case "open_frame":
+            if let openToken {
+                requestFreshOpenFrame(token: openToken)
+                startOpenWatchdog(token: openToken)
+            }
+        case "frame_candidate":
             guard let token = body["token"] as? String, token == openToken,
                   let surface = activeSurface,
                   let container = containers[surface]?.view else { return }
-            openToken = nil
-            openWatchdog?.cancel()
-            openWatchdog = nil
-            container.showCover(false)
-            let openElapsed = openStartedAt.map {
-                Int((ProcessInfo.processInfo.systemUptime - $0) * 1_000)
-            }
-            DirectStreamTelemetry.record(
-                component: "video",
-                event: "live_view",
-                surface: surface.rawValue,
-                elapsedMilliseconds: openElapsed
-            )
-            recordSnapshot(surface: surface, openElapsed: openElapsed)
+            verifyVisibleOpenFrame(token: token, surface: surface, container: container)
         case "video_error":
             recover(reason: event)
         case "frame_stalled":
@@ -297,9 +290,6 @@ final class CameraPlaybackController: NSObject, WKNavigationDelegate, WKScriptMe
             try? await Task.sleep(for: .seconds(delay))
             guard !Task.isCancelled, let self, self.relayAvailable else { return }
             self.startSession()
-            if let token = self.openToken {
-                self.startOpenWatchdog(token: token)
-            }
         }
     }
 
@@ -336,23 +326,70 @@ final class CameraPlaybackController: NSObject, WKNavigationDelegate, WKScriptMe
         return window
     }
 
-    private func recordSnapshot(surface: Surface, openElapsed: Int?) {
+    private func verifyVisibleOpenFrame(
+        token: String,
+        surface: Surface,
+        container: CameraVideoContainerView
+    ) {
         guard let webView = session?.webView else { return }
         let configuration = WKSnapshotConfiguration()
         configuration.rect = webView.bounds
         configuration.snapshotWidth = 64
-        webView.takeSnapshot(with: configuration) { image, _ in
-            Task { @MainActor in
-                guard let image,
+        webView.takeSnapshot(with: configuration) { [weak self, weak container] image, error in
+            Task { @MainActor [weak self, weak container] in
+                guard let self, self.openToken == token,
+                      self.session?.webView === webView,
+                      self.activeSurface == surface,
+                      let container,
+                      self.containers[surface]?.view === container else { return }
+                guard error == nil,
+                      let image,
                       let tiff = image.tiffRepresentation,
-                      let bitmap = NSBitmapImageRep(data: tiff) else { return }
+                      let bitmap = NSBitmapImageRep(data: tiff) else {
+                    DirectStreamTelemetry.record(
+                        component: "video",
+                        event: "visible_frame_check_failed",
+                        surface: surface.rawValue
+                    )
+                    self.requestFreshOpenFrame(token: token)
+                    return
+                }
                 let ratios = Self.pixelRatios(bitmap)
+                let openElapsed = self.openStartedAt.map {
+                    Int((ProcessInfo.processInfo.systemUptime - $0) * 1_000)
+                }
                 DirectStreamTelemetry.record(
                     component: "video",
                     event: "webview_snapshot_sample",
                     surface: surface.rawValue,
                     elapsedMilliseconds: openElapsed,
                     detail: "white=\(ratios.white) dark=\(ratios.dark) color=\(ratios.color) pixels=\(ratios.total)"
+                )
+                guard ratios.total > 0, ratios.dark < 0.995 else {
+                    DirectStreamTelemetry.record(
+                        component: "video",
+                        event: "black_output_suspected",
+                        surface: surface.rawValue,
+                        elapsedMilliseconds: openElapsed
+                    )
+                    self.requestFreshOpenFrame(token: token)
+                    return
+                }
+                self.openToken = nil
+                self.openWatchdog?.cancel()
+                self.openWatchdog = nil
+                container.showCover(false)
+                DirectStreamTelemetry.record(
+                    component: "video",
+                    event: "open_frame",
+                    surface: surface.rawValue,
+                    elapsedMilliseconds: openElapsed
+                )
+                DirectStreamTelemetry.record(
+                    component: "video",
+                    event: "live_view",
+                    surface: surface.rawValue,
+                    elapsedMilliseconds: openElapsed
                 )
             }
         }

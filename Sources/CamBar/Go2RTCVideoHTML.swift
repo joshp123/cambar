@@ -83,7 +83,7 @@ extension CameraPlaybackController {
                 }
               }
 
-              const onFrame = (_now, metadata) => {
+              function noteFrame(presentedFrames) {
                 lastFrameAt = performance.now();
                 stallReported = false;
                 if (!sawFirstFrame && video.videoWidth > 0 && video.videoHeight > 0) {
@@ -91,25 +91,67 @@ extension CameraPlaybackController {
                   emit('first_frame', {detail: JSON.stringify({
                     width: video.videoWidth,
                     height: video.videoHeight,
-                    presentedFrames: metadata.presentedFrames
+                    presentedFrames
                   })});
                 }
+              }
+
+              function completeOpen(token, values) {
+                if (!pendingOpen || pendingOpen.token !== token) return;
+                const open = pendingOpen;
+                pendingOpen = null;
+                emit('frame_candidate', {
+                  token: open.token,
+                  detail: JSON.stringify({
+                    frame_wait_ms: Math.round(performance.now() - open.startedAt),
+                    ...values
+                  })
+                });
+                setTimeout(sampleFrame, 0);
+              }
+
+              function frameCount() {
+                try {
+                  return video.getVideoPlaybackQuality().totalVideoFrames;
+                } catch (_) {
+                  return null;
+                }
+              }
+
+              function probeVisibleFrames(token, baseline, deadline) {
+                if (!pendingOpen || pendingOpen.token !== token) return;
+                const current = frameCount();
+                if (current !== null && baseline !== null && current > baseline) {
+                  noteFrame(current);
+                  completeOpen(token, {presentedFrames: current, source: 'frame_counter'});
+                  return;
+                }
+                if (performance.now() < deadline) {
+                  requestAnimationFrame(() => probeVisibleFrames(token, baseline, deadline));
+                }
+              }
+
+              const onFrame = (_now, metadata) => {
+                noteFrame(metadata.presentedFrames);
                 if (pendingOpen) {
-                  const open = pendingOpen;
-                  pendingOpen = null;
-                  emit('open_frame', {
-                    token: open.token,
-                    detail: JSON.stringify({
-                      frame_wait_ms: Math.round(performance.now() - open.startedAt),
-                      presentedFrames: metadata.presentedFrames,
-                      mediaTime: metadata.mediaTime
-                    })
+                  completeOpen(pendingOpen.token, {
+                    presentedFrames: metadata.presentedFrames,
+                    mediaTime: metadata.mediaTime,
+                    source: 'video_frame_callback'
                   });
-                  setTimeout(sampleFrame, 0);
                 }
                 video.requestVideoFrameCallback(onFrame);
               };
               video.requestVideoFrameCallback(onFrame);
+
+              window.__cambarMarkOpen = token => {
+                const baseline = frameCount();
+                pendingOpen = {token, startedAt: performance.now()};
+                video.play().catch(() => {});
+                requestAnimationFrame(() => {
+                  probeVisibleFrames(token, baseline, performance.now() + 1000);
+                });
+              };
             }
 
             class CamBarVideo extends VideoRTC {
@@ -140,9 +182,6 @@ extension CameraPlaybackController {
               }
             }, 500);
 
-            window.__cambarMarkOpen = token => {
-              pendingOpen = {token, startedAt: performance.now()};
-            };
             window.__cambarStop = () => {
               clearInterval(stallTimer);
               pendingOpen = null;
