@@ -414,6 +414,7 @@ final class CameraVideoContainerView: NSView {
         wantsLayer = true
         layer?.backgroundColor = NSColor.black.cgColor
         layer?.cornerRadius = cornerRadius
+        layer?.cornerCurve = .continuous
         layer?.masksToBounds = true
         cover.wantsLayer = true
         cover.layer?.backgroundColor = NSColor.black.cgColor

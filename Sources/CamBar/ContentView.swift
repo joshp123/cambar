@@ -14,7 +14,7 @@ final class CamBarUIState {
 
 struct ContentView: View {
     static let contentInset: CGFloat = 6
-    static let videoCornerRadius: CGFloat = 10
+    static let videoCornerRadius: CGFloat = 12
 
     var state: CamBarUIState
     let playback: CameraPlaybackController
