@@ -61,30 +61,12 @@ private enum SmokeError: Error, CustomStringConvertible {
     }
 }
 
-private struct FrontmostApplication {
-    let processIdentifier: pid_t
-    let name: String
-
-    static func capture() throws -> Self {
-        guard let application = NSWorkspace.shared.frontmostApplication else {
-            throw SmokeError.message("could not identify the frontmost application")
-        }
-        return Self(
-            processIdentifier: application.processIdentifier,
-            name: application.localizedName ?? application.bundleIdentifier ?? "unknown"
-        )
+private func assertCamBarIsNotFrontmost(_ context: String) throws {
+    guard let current = NSWorkspace.shared.frontmostApplication else {
+        throw SmokeError.message("frontmost application disappeared \(context)")
     }
-
-    func assertUnchanged(_ context: String) throws {
-        guard let current = NSWorkspace.shared.frontmostApplication else {
-            throw SmokeError.message("frontmost application disappeared \(context)")
-        }
-        guard current.processIdentifier == processIdentifier else {
-            let currentName = current.localizedName ?? current.bundleIdentifier ?? "unknown"
-            throw SmokeError.message(
-                "focus was stolen \(context): expected \(name), found \(currentName)"
-            )
-        }
+    if current.bundleIdentifier == appBundleIdentifier {
+        throw SmokeError.message("CamBar stole focus \(context)")
     }
 }
 
@@ -155,6 +137,10 @@ private final class TelemetryReader {
             guard matches == 0 else {
                 throw SmokeError.message("telemetry recorded \(matches) \(forbidden) event(s)")
             }
+        }
+        let activations = try count("app_activated", component: "app")
+        guard activations == 0 else {
+            throw SmokeError.message("telemetry recorded \(activations) CamBar activation event(s)")
         }
     }
 
@@ -586,7 +572,7 @@ private func run() throws {
     }
 
     let originalCursor = CGEvent(source: nil)?.location
-    let frontmost = try FrontmostApplication.capture()
+    try assertCamBarIsNotFrontmost("before launch")
     let ownership = OwnedProcesses(appURL: appURL, pidFileURL: URL(fileURLWithPath: pidFilePath))
     defer {
         if let originalCursor { CGWarpMouseCursorPosition(originalCursor) }
@@ -600,7 +586,7 @@ private func run() throws {
     try ownership.registerApp(application)
     try ownership.waitForHelper(timeout: 10)
     try telemetry.waitForLaunch(excluding: previousTelemetrySession, timeout: 10)
-    try frontmost.assertUnchanged("after background launch")
+    try assertCamBarIsNotFrontmost("after background launch")
 
     let driver = StatusItemDriver(processIdentifier: application.processIdentifier)
     let statusFrame = try driver.waitForFrame(timeout: 10)
@@ -621,7 +607,7 @@ private func run() throws {
         try telemetry.waitForCount("live_view", count: cycle, timeout: 12, surface: "menu")
         try telemetry.waitForCount("frame_sample", count: cycle, timeout: 2, surface: "menu")
         try telemetry.assertNoFailures()
-        try frontmost.assertUnchanged("after \(phase) open")
+        try assertCamBarIsNotFrontmost("after \(phase) open")
         if cycle == 1 {
             try capturePopoverScreenshot(processIdentifier: application.processIdentifier, path: options.screenshotPath)
         }
@@ -638,12 +624,12 @@ private func run() throws {
         try telemetry.waitForCount("menu_closed", count: cycle, timeout: 3, surface: "menu")
         try telemetry.assertNoFailures()
         try ownership.refreshHelpers()
-        try frontmost.assertUnchanged("after \(phase) close")
+        try assertCamBarIsNotFrontmost("after \(phase) close")
         print("PASS: \(phase) open/live-frame/close")
     }
 
     try assertExactCounts(telemetry: telemetry, opens: totalOpenCycles, closes: totalOpenCycles)
-    try frontmost.assertUnchanged("at completion")
+    try assertCamBarIsNotFrontmost("at completion")
     let inputDescription = options.inputMode == .physical ? "physical clicks" : "accessibility presses"
     print("PASS: \(totalOpenCycles) open/close cycles via \(inputDescription), exact intents, no recovery or black-frame telemetry")
 }

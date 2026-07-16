@@ -58,6 +58,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         DirectStreamTelemetry.flush()
     }
 
+    func applicationDidBecomeActive(_ notification: Notification) {
+        DirectStreamTelemetry.record(component: "app", event: "app_activated")
+    }
+
     private func configureStatusItem() {
         guard let button = statusItem.button else { return }
         let image = NSImage(systemSymbolName: "video.fill", accessibilityDescription: "CamBar")
