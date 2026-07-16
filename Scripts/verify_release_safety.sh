@@ -13,8 +13,13 @@ if rg -n 'NSStatusItemExpandedInterface|CAMBAR_OPEN_(WINDOW|POPOVER)' Sources; t
   fail "release source contains expanded-interface or autonomous-open hooks"
 fi
 
-ACTIVATIONS=$(rg -n 'NSApp\.activate\(ignoringOtherApps: true\)' Sources/CamBar/AppDelegate.swift | wc -l | tr -d ' ')
-[[ "$ACTIVATIONS" == "1" ]] || fail "release source must contain exactly one explicit popout activation"
+if rg -n 'activate\(ignoringOtherApps:' Sources/CamBar/AppDelegate.swift; then
+  fail "release source contains forced app activation"
+fi
+ACTIVATIONS=$(rg -n 'NSApp\.activate\(\)' Sources/CamBar/AppDelegate.swift | wc -l | tr -d ' ')
+[[ "$ACTIVATIONS" == "1" ]] || fail "release source must contain exactly one cooperative popout activation"
+ACTIVATION_YIELDS=$(rg -n 'NSApp\.yieldActivation\(to:' Sources/CamBar/AppDelegate.swift | wc -l | tr -d ' ')
+[[ "$ACTIVATION_YIELDS" == "1" ]] || fail "release source must contain exactly one cooperative activation yield"
 OPEN_WINDOW_CALLS=$(rg -n 'openWindow\(\)' Sources/CamBar/AppDelegate.swift | wc -l | tr -d ' ')
 [[ "$OPEN_WINDOW_CALLS" == "2" ]] || fail "openWindow must only be defined and called by the expand-button action"
 POPOVER_ENTRY_POINTS=$(rg -n 'presentPopoverFromStatusItem\(\)' Sources/CamBar/AppDelegate.swift | wc -l | tr -d ' ')
