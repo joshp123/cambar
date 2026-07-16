@@ -129,7 +129,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
             queue: .main
         ) { [weak self] _ in
             Task { @MainActor [weak self] in
-                self?.handleStatusItemClick()
+                self?.performStatusItemAction(
+                    event: nil,
+                    clickAt: ProcessInfo.processInfo.systemUptime
+                )
             }
         }
         DirectStreamTelemetry.record(component: "app", event: "smoke_control_ready")
@@ -202,13 +205,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
 
     @objc private func handleStatusItemClick() {
         let event = NSApp.currentEvent
+        performStatusItemAction(
+            event: event,
+            clickAt: event?.timestamp ?? ProcessInfo.processInfo.systemUptime
+        )
+    }
+
+    private func performStatusItemAction(event: NSEvent?, clickAt: TimeInterval) {
         if let event,
            event.type == .rightMouseUp || event.modifierFlags.contains(.control) {
             requestPopoverClose(reason: "status_context_menu", at: event.timestamp)
             showStatusMenu(for: event)
             return
         }
-        let clickAt = event?.timestamp ?? ProcessInfo.processInfo.systemUptime
         let wantedVisibleBeforeClick = popoverPresentation.wantsVisible
         let command = popoverPresentation.toggle(at: clickAt)
         if !wantedVisibleBeforeClick, popoverPresentation.wantsVisible {
