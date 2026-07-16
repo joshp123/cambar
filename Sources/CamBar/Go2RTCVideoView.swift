@@ -44,7 +44,16 @@ final class CameraPlaybackController: NSObject, WKNavigationDelegate, WKScriptMe
     func setRelayReady(_ ready: Bool, warmSize: CGSize) {
         relayReady = ready
         if ready {
-            warm(size: warmSize)
+            parkingView.frame = NSRect(
+                origin: .zero,
+                size: CGSize(width: max(warmSize.width, 320), height: max(warmSize.height, 180))
+            )
+            parkingWindow.setContentSize(parkingView.frame.size)
+            if let activeSurface {
+                show(activeSurface)
+            } else {
+                warm(size: warmSize)
+            }
         } else {
             tearDownSession(reason: "relay_unavailable")
             phase = .idle

@@ -1,4 +1,5 @@
 import CamBarCore
+import Darwin
 import Foundation
 
 @MainActor
@@ -66,13 +67,12 @@ final class Go2RTCRelayController {
 
     func restart() {
         cancelRecovery()
-        terminateProcess()
         start()
     }
 
     func stop() {
         cancelRecovery()
-        terminateProcess()
+        terminateProcessForShutdown()
         state = .stopped
     }
 
@@ -87,7 +87,7 @@ final class Go2RTCRelayController {
         while !Task.isCancelled, expectedGeneration == generation {
             attempt += 1
             state = .starting(attempt: attempt)
-            terminateProcess()
+            await terminateProcess()
             if attempt > 1 {
                 try? await Task.sleep(for: .milliseconds(150))
             }
@@ -101,7 +101,7 @@ final class Go2RTCRelayController {
                     failureCount = 0
                     let failure = await waitForRuntimeFailure(generation: expectedGeneration)
                     guard !Task.isCancelled, expectedGeneration == generation else { return }
-                    terminateProcess()
+                    await terminateProcess()
                     await scheduleRetry(after: failure, failureCount: &failureCount)
                     continue
                 }
@@ -116,7 +116,7 @@ final class Go2RTCRelayController {
             } else {
                 failure = .cameraUnavailable
             }
-            terminateProcess()
+            await terminateProcess()
             await scheduleRetry(after: failure, failureCount: &failureCount)
         }
     }
@@ -249,7 +249,7 @@ final class Go2RTCRelayController {
         closeLogOutput()
     }
 
-    private func terminateProcess() {
+    private func terminateProcess() async {
         guard let process else {
             closeLogOutput()
             return
@@ -257,6 +257,31 @@ final class Go2RTCRelayController {
         process.terminationHandler = nil
         if process.isRunning {
             process.terminate()
+        }
+        self.process = nil
+        closeLogOutput()
+        for _ in 0..<20 where process.isRunning {
+            try? await Task.sleep(for: .milliseconds(50))
+        }
+        if process.isRunning {
+            Darwin.kill(process.processIdentifier, SIGKILL)
+        }
+    }
+
+    private func terminateProcessForShutdown() {
+        guard let process else {
+            closeLogOutput()
+            return
+        }
+        process.terminationHandler = nil
+        if process.isRunning {
+            process.terminate()
+        }
+        for _ in 0..<20 where process.isRunning {
+            usleep(10_000)
+        }
+        if process.isRunning {
+            Darwin.kill(process.processIdentifier, SIGKILL)
         }
         self.process = nil
         closeLogOutput()

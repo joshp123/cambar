@@ -99,6 +99,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
 
     private func showPopoverFromStatusItem() {
         guard let button = statusItem.button else { return }
+        if windowController?.window?.isVisible == true {
+            windowController?.close()
+        }
         let size = bestPopoverVideoSize(anchorButton: button)
         uiState.videoSize = size
         popover.contentSize = ContentView.contentSize(forVideoSize: size)
