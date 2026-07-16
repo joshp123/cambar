@@ -4,27 +4,9 @@ import WebKit
 
 @MainActor
 final class CameraPlaybackController: NSObject, WKNavigationDelegate, WKScriptMessageHandler {
-    enum Surface: String, CaseIterable, Sendable {
+    enum Surface: String, Sendable {
         case menu
         case window
-    }
-
-    enum Phase: Equatable {
-        case idle
-        case warming
-        case warm
-        case opening(Surface)
-        case playing(Surface)
-        case retrying
-    }
-
-    var onPhaseChange: ((Phase) -> Void)?
-
-    private(set) var phase: Phase = .idle {
-        didSet {
-            guard phase != oldValue else { return }
-            onPhaseChange?(phase)
-        }
     }
 
     private var relayReady = false
@@ -41,22 +23,16 @@ final class CameraPlaybackController: NSObject, WKNavigationDelegate, WKScriptMe
     private lazy var parkingWindow = makeParkingWindow()
     private let diagnosticsEnabled = ProcessInfo.processInfo.environment["CAMBAR_DIAGNOSTICS"] == "1"
 
-    func setRelayReady(_ ready: Bool, warmSize: CGSize) {
+    func setRelayReady(_ ready: Bool) {
         relayReady = ready
         if ready {
-            parkingView.frame = NSRect(
-                origin: .zero,
-                size: CGSize(width: max(warmSize.width, 320), height: max(warmSize.height, 180))
-            )
-            parkingWindow.setContentSize(parkingView.frame.size)
             if let activeSurface {
                 show(activeSurface)
             } else {
-                warm(size: warmSize)
+                warm()
             }
         } else {
             tearDownSession(reason: "relay_unavailable")
-            phase = .idle
         }
     }
 
@@ -75,10 +51,8 @@ final class CameraPlaybackController: NSObject, WKNavigationDelegate, WKScriptMe
         }
     }
 
-    func warm(size: CGSize) {
+    private func warm() {
         guard relayReady else { return }
-        parkingView.frame = NSRect(origin: .zero, size: CGSize(width: max(size.width, 320), height: max(size.height, 180)))
-        parkingWindow.setContentSize(parkingView.frame.size)
         guard session == nil else {
             if activeSurface == nil {
                 parkSession()
@@ -93,7 +67,6 @@ final class CameraPlaybackController: NSObject, WKNavigationDelegate, WKScriptMe
         let token = UUID().uuidString
         openToken = token
         openStartedAt = ProcessInfo.processInfo.systemUptime
-        phase = .opening(surface)
 
         guard relayReady else { return }
         if session == nil {
@@ -115,7 +88,6 @@ final class CameraPlaybackController: NSObject, WKNavigationDelegate, WKScriptMe
         openWatchdog?.cancel()
         openWatchdog = nil
         parkSession()
-        phase = session?.hasFrame == true ? .warm : .warming
     }
 
     func retryNow() {
@@ -129,7 +101,6 @@ final class CameraPlaybackController: NSObject, WKNavigationDelegate, WKScriptMe
         restartTask?.cancel()
         tearDownSession(reason: "shutdown")
         parkingWindow.orderOut(nil)
-        phase = .idle
     }
 
     func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
@@ -157,9 +128,6 @@ final class CameraPlaybackController: NSObject, WKNavigationDelegate, WKScriptMe
             restartCount = 0
             startupWatchdog?.cancel()
             startupWatchdog = nil
-            if activeSurface == nil {
-                phase = .warm
-            }
         case "open_frame":
             guard let token = body["token"] as? String, token == openToken,
                   let surface = activeSurface else { return }
@@ -167,7 +135,6 @@ final class CameraPlaybackController: NSObject, WKNavigationDelegate, WKScriptMe
             openWatchdog?.cancel()
             openWatchdog = nil
             containers[surface]?.view?.showCover(false)
-            phase = .playing(surface)
             let openElapsed = openStartedAt.map {
                 Int((ProcessInfo.processInfo.systemUptime - $0) * 1_000)
             }
@@ -223,13 +190,11 @@ final class CameraPlaybackController: NSObject, WKNavigationDelegate, WKScriptMe
         webView.navigationDelegate = self
         webView.autoresizingMask = [.width, .height]
         session = VideoSession(generation: generation, webView: webView)
-        phase = activeSurface.map(Phase.opening) ?? .warming
 
         if let activeSurface, let container = containers[activeSurface]?.view {
             attach(webView, to: container)
         } else {
-            attach(webView, to: parkingView)
-            parkingWindow.orderFront(nil)
+            parkSession()
         }
 
         webView.loadHTMLString(Self.html(generation: generation), baseURL: URL(string: "http://127.0.0.1:1984/"))
@@ -239,6 +204,7 @@ final class CameraPlaybackController: NSObject, WKNavigationDelegate, WKScriptMe
     private func attach(_ webView: WKWebView, to container: CameraVideoContainerView) {
         container.attach(webView)
         if container !== parkingView {
+            parkingWindow.orderOut(nil)
             container.showCover(true)
         }
     }
@@ -289,7 +255,6 @@ final class CameraPlaybackController: NSObject, WKNavigationDelegate, WKScriptMe
         DirectStreamTelemetry.record(component: "video", event: "recover", detail: "reason=\(reason)")
         tearDownSession(reason: reason)
         restartCount += 1
-        phase = .retrying
         let delays: [TimeInterval] = [0.1, 0.5, 2, 5]
         let delay = delays[min(restartCount - 1, delays.count - 1)]
         restartTask?.cancel()
@@ -316,6 +281,7 @@ final class CameraPlaybackController: NSObject, WKNavigationDelegate, WKScriptMe
         session.webView.configuration.userContentController.removeScriptMessageHandler(forName: "cambarVideoEvent")
         session.webView.removeFromSuperview()
         self.session = nil
+        parkingWindow.orderOut(nil)
     }
 
     private func makeParkingWindow() -> NSWindow {

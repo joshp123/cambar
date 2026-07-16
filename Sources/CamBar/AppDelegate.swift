@@ -74,11 +74,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     }
 
     private func relayStateDidChange(_ state: Go2RTCRelayController.State) {
-        let ready = state == .ready
-        uiState.relayAvailable = ready
-        uiState.videoSize = bestPopoverVideoSize(anchorButton: statusItem.button)
-        playbackController.setRelayReady(ready, warmSize: uiState.videoSize)
-        guard ready else { return }
+        switch state {
+        case .ready:
+            uiState.status = .ready
+        case .waitingToRetry, .stopped:
+            uiState.status = .unavailable
+        case .starting, .warming:
+            uiState.status = .connecting
+        }
+        playbackController.setRelayReady(state == .ready)
+        guard state == .ready else { return }
         runDebugHooksOnce()
     }
 
@@ -116,18 +121,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
                 playback: playbackController,
                 nativeVideoSize: nativeVideoSize,
                 onClose: { [weak self] in
-                    self?.playbackController.hide(.window)
                     self?.windowController = nil
                 }
             )
         }
-        windowController?.showWindow(nil)
-        windowController?.window?.makeKeyAndOrderFront(nil)
-        playbackController.show(.window)
         if popover.isShown {
             popover.performClose(nil)
         }
         NSApp.activate(ignoringOtherApps: true)
+        windowController?.present()
     }
 
     private func bestPopoverVideoSize(anchorButton: NSStatusBarButton?) -> NSSize {
