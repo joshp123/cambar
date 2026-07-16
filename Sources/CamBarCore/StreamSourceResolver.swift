@@ -87,7 +87,7 @@ public enum StreamSourceResolver {
            !env.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             return env
         }
-        return userDefaultString("rtspURL")
+        return nil
     }
 
     public static func maskRtspURL(_ raw: String) -> String {
@@ -126,32 +126,29 @@ public enum StreamSourceResolver {
             return nil
         }
         var current = CameraConfig()
+        var insideCameras = false
         var hasCamera = false
         for rawLine in text.split(whereSeparator: \.isNewline) {
             let line = rawLine.trimmingCharacters(in: .whitespaces)
             if line.isEmpty || line.hasPrefix("#") { continue }
-            if line.hasPrefix("- name:") {
+
+            if !insideCameras {
+                insideCameras = line == "cameras:"
+                continue
+            }
+            if rawLine.first?.isWhitespace != true, !line.hasPrefix("-") {
+                break
+            }
+            if line == "-" || line.hasPrefix("- ") {
                 if hasCamera {
                     break
                 }
                 hasCamera = true
-                current.name = line.replacingOccurrences(of: "- name:", with: "")
-                    .trimmingCharacters(in: .whitespaces)
-                continue
-            }
-            let parts = line.split(separator: ":", maxSplits: 1, omittingEmptySubsequences: false)
-            guard parts.count == 2 else { continue }
-            let key = parts[0].trimmingCharacters(in: .whitespaces)
-            let rawValue = parts[1].trimmingCharacters(in: .whitespaces)
-            let value = stripQuotes(rawValue)
-            switch key {
-            case "host": current.host = value
-            case "port": current.port = Int(value)
-            case "protocol": current.protocolName = value
-            case "username": current.username = value
-            case "password": current.password = value
-            case "stream": current.stream = value
-            default: break
+                let itemStart = line.dropFirst().trimmingCharacters(in: .whitespaces)
+                if itemStart.isEmpty { continue }
+                applyConfigEntry(String(itemStart), to: &current)
+            } else if hasCamera {
+                applyConfigEntry(line, to: &current)
             }
         }
         return hasCamera ? current : nil
@@ -159,11 +156,17 @@ public enum StreamSourceResolver {
 
     public static func buildRtspURL(from camera: CameraConfig) -> String? {
         if let stream = camera.stream, stream.contains("://") {
+            guard let components = URLComponents(string: stream),
+                  ["rtsp", "rtsps"].contains(components.scheme?.lowercased() ?? ""),
+                  components.host != nil else { return nil }
             return stream
         }
-        guard let host = camera.host else { return nil }
-        let scheme = camera.protocolName ?? "rtsp"
+        guard let host = camera.host?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !host.isEmpty, !host.contains(where: \.isWhitespace) else { return nil }
+        let scheme = (camera.protocolName ?? "rtsp").lowercased()
+        guard ["rtsp", "rtsps"].contains(scheme) else { return nil }
         let port = camera.port ?? 554
+        guard (1...65_535).contains(port) else { return nil }
         var userInfo = ""
         if let username = camera.username {
             let user = username.addingPercentEncoding(withAllowedCharacters: .urlUserAllowed) ?? username
@@ -188,13 +191,21 @@ public enum StreamSourceResolver {
         return folder
     }
 
-    private static func userDefaultString(_ key: String) -> String? {
-        guard let value = UserDefaults.standard.string(forKey: key)?
-            .trimmingCharacters(in: .whitespacesAndNewlines),
-              !value.isEmpty else {
-            return nil
+    private static func applyConfigEntry(_ line: String, to camera: inout CameraConfig) {
+        let parts = line.split(separator: ":", maxSplits: 1, omittingEmptySubsequences: false)
+        guard parts.count == 2 else { return }
+        let key = parts[0].trimmingCharacters(in: .whitespaces)
+        let value = stripQuotes(parts[1].trimmingCharacters(in: .whitespaces))
+        switch key {
+        case "name": camera.name = value
+        case "host": camera.host = value
+        case "port": camera.port = Int(value)
+        case "protocol": camera.protocolName = value
+        case "username": camera.username = value
+        case "password": camera.password = value
+        case "stream": camera.stream = value
+        default: break
         }
-        return value
     }
 
     private static func stripQuotes(_ value: String) -> String {

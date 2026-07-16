@@ -54,6 +54,34 @@ final class CamBarTests: XCTestCase {
         XCTAssertEqual(config?.stream, "Streaming/Channels/101")
     }
 
+    func testLoadCameraConfigAcceptsExpandedListItemAndIgnoresOtherSections() throws {
+        let yaml = """
+        host: wrong.example
+        cameras:
+          -
+            name: front
+            host: camera.local
+            port: 8554
+            protocol: rtsp
+            stream: live
+          - name: ignored
+            host: ignored.example
+        output:
+          host: also-wrong.example
+        """
+        let tempURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+            .appendingPathExtension("yaml")
+        try yaml.write(to: tempURL, atomically: true, encoding: .utf8)
+        defer { try? FileManager.default.removeItem(at: tempURL) }
+
+        let config = StreamSourceResolver.loadCameraConfig(from: tempURL)
+
+        XCTAssertEqual(config?.name, "front")
+        XCTAssertEqual(config?.host, "camera.local")
+        XCTAssertEqual(config?.port, 8554)
+    }
+
     func testBuildRtspURLFromCameraConfig() {
         let config = StreamSourceResolver.CameraConfig(
             name: "hikvision",
@@ -68,6 +96,12 @@ final class CamBarTests: XCTestCase {
         let rtspURL = StreamSourceResolver.buildRtspURL(from: config)
 
         XCTAssertEqual(rtspURL, "rtsp://admin:secret@192.168.1.249:554/Streaming/Channels/101")
+    }
+
+    func testBuildRtspURLRejectsInvalidInputs() {
+        XCTAssertNil(StreamSourceResolver.buildRtspURL(from: .init(host: "camera.local", port: 70_000)))
+        XCTAssertNil(StreamSourceResolver.buildRtspURL(from: .init(host: "camera.local", protocolName: "http")))
+        XCTAssertNil(StreamSourceResolver.buildRtspURL(from: .init(stream: "https://camera.local/live")))
     }
 
     func testRelayHealthRequiresCurrentVideoFlow() throws {
