@@ -491,9 +491,11 @@ private final class OwnedProcesses {
     }
 
     func registerApp(_ application: NSRunningApplication) throws {
-        let pid = application.processIdentifier
-        let expectedPath = appURL.appendingPathComponent("Contents/MacOS/CamBar").standardizedFileURL.path
-        guard processPath(pid) == expectedPath else {
+        try registerProcessIdentifier(application.processIdentifier)
+    }
+
+    func registerProcessIdentifier(_ pid: pid_t) throws {
+        guard processPath(pid) == appExecutablePath else {
             throw SmokeError.message("launched CamBar PID \(pid) has an unexpected executable path")
         }
         appPID = pid
@@ -580,10 +582,11 @@ private func runningCamBar(appURL: URL) -> NSRunningApplication? {
     }
 }
 
-private func waitForCamBar(appURL: URL, timeout: TimeInterval) throws -> NSRunningApplication {
+private func waitForCamBar(processIdentifier: pid_t, timeout: TimeInterval) throws -> NSRunningApplication {
     let deadline = Date().addingTimeInterval(timeout)
     repeat {
-        if let application = runningCamBar(appURL: appURL), !application.isTerminated {
+        if let application = NSRunningApplication(processIdentifier: processIdentifier),
+           !application.isTerminated {
             return application
         }
         RunLoop.current.run(until: Date().addingTimeInterval(0.05))
@@ -864,7 +867,11 @@ private func run() throws {
     launchEnvironment["CAMBAR_SMOKE_CONTROL"] = "1"
     launchedProcess.environment = launchEnvironment
     try launchedProcess.run()
-    let application = try waitForCamBar(appURL: appURL, timeout: 10)
+    try ownership.registerProcessIdentifier(launchedProcess.processIdentifier)
+    let application = try waitForCamBar(
+        processIdentifier: launchedProcess.processIdentifier,
+        timeout: 10
+    )
     try ownership.registerApp(application)
     try ownership.assertNoChildProcesses()
     try telemetry.waitForLaunch(excluding: previousTelemetrySession, timeout: 10)
