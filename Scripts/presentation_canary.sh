@@ -4,6 +4,7 @@ set -euo pipefail
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 APP="$HOME/Applications/CamBar.app"
 EXECUTABLE="$APP/Contents/MacOS/CamBar"
+HELPER="$APP/Contents/Resources/bin/go2rtc"
 LOG="$HOME/Library/Caches/CamBar/direct/direct-stream-events.jsonl"
 
 fail() {
@@ -18,12 +19,19 @@ fail() {
 if pgrep -f "$EXECUTABLE" >/dev/null; then
   fail "CamBar is already running"
 fi
+if pgrep -f "$HELPER" >/dev/null; then
+  fail "CamBar's bundled go2rtc is already running without the app"
+fi
 
-LOG_SIZE_BEFORE=$(stat -f%z "$LOG" 2>/dev/null || echo 0)
+PREVIOUS_SESSION=""
+if [[ -f "$LOG" ]]; then
+  PREVIOUS_SESSION=$(jq -r 'select(.event == "launch" and .session_id != null) | .session_id' "$LOG" | tail -n 1)
+fi
 cleanup_failed_canary() {
   local exit_code=$?
   trap - EXIT INT TERM
   pkill -f "$EXECUTABLE" >/dev/null 2>&1 || true
+  pkill -f "$HELPER" >/dev/null 2>&1 || true
   exit "$exit_code"
 }
 trap cleanup_failed_canary EXIT INT TERM
@@ -38,14 +46,21 @@ fi
 if [[ ! -f "$LOG" ]]; then
   fail "CamBar produced no telemetry and was stopped"
 fi
-LOG_SIZE_AFTER=$(stat -f%z "$LOG" 2>/dev/null || echo 0)
-if (( LOG_SIZE_AFTER < LOG_SIZE_BEFORE )); then
-  LOG_SIZE_BEFORE=0
-fi
-if ! tail -c "+$((LOG_SIZE_BEFORE + 1))" "$LOG" | rg -q '"event":"launch"'; then
+CANARY_SESSION=$(jq -r 'select(.event == "launch" and .session_id != null) | .session_id' "$LOG" | tail -n 1)
+if [[ -z "$CANARY_SESSION" || "$CANARY_SESSION" == "$PREVIOUS_SESSION" ]]; then
   fail "CamBar produced no fresh launch event and was stopped"
 fi
-if tail -c "+$((LOG_SIZE_BEFORE + 1))" "$LOG" | rg -q '"event":"(menu_open_requested|menu_will_show|menu_did_show|window_open_requested)"'; then
+if jq -e --arg session "$CANARY_SESSION" '
+  select(
+    .session_id == $session
+    and (
+      .event == "menu_open_requested"
+      or .event == "menu_will_show"
+      or .event == "menu_did_show"
+      or .event == "window_open_requested"
+    )
+  )
+' "$LOG" >/dev/null; then
   fail "CamBar presented UI without user input and was stopped"
 fi
 
@@ -53,3 +68,4 @@ trap - EXIT INT TERM
 echo "Automatic presentation canary passed; CamBar is running."
 echo "Manually click the status icon twice and confirm it opens once, then closes once."
 echo "Emergency stop: pkill -f '$EXECUTABLE'"
+echo "Then stop its helper: pkill -f '$HELPER'"

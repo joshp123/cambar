@@ -5,6 +5,7 @@ public enum DirectStreamTelemetry {
     private static let queue = DispatchQueue(label: "CamBar.direct-telemetry")
     private static let logger = Logger(subsystem: "com.cambar", category: "stream")
     private static let maximumLogBytes: UInt64 = 512 * 1_024
+    private static let sessionID = UUID().uuidString
 
     public static var logURL: URL {
         StreamSourceResolver.makeCacheFolderURL(namespace: "direct")
@@ -38,6 +39,7 @@ public enum DirectStreamTelemetry {
             var fields: [String: Any] = [
                 "time": ISO8601DateFormatter().string(from: Date()),
                 "uptime_ms": Int(ProcessInfo.processInfo.systemUptime * 1_000),
+                "session_id": sessionID,
                 "component": component,
                 "event": event
             ]
