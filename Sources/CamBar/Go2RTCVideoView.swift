@@ -150,7 +150,7 @@ final class CameraPlaybackController: NSObject, WKNavigationDelegate, WKScriptMe
         case "video_error":
             recover(reason: event)
         case "frame_stalled":
-            if activeSurface != nil {
+            if activeSurface != nil, NSApp.isActive {
                 recover(reason: event)
             }
         default:

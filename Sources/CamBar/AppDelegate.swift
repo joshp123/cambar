@@ -49,6 +49,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         DirectStreamTelemetry.flush()
     }
 
+    func applicationDidResignActive(_ notification: Notification) {
+        if popover.isShown {
+            popover.performClose(nil)
+        }
+    }
+
     private func configureStatusItem() {
         guard let button = statusItem.button else { return }
         let image = NSImage(systemSymbolName: "video.fill", accessibilityDescription: "CamBar")
@@ -112,6 +118,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         uiState.videoSize = size
         popover.contentSize = ContentView.contentSize(forVideoSize: size)
         DirectStreamTelemetry.record(component: "app", event: "menu_open_requested", surface: "menu")
+        NSApp.activate(ignoringOtherApps: true)
         popover.show(relativeTo: button.bounds, of: button, preferredEdge: .maxY)
     }
 
