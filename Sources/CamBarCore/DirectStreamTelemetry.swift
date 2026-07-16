@@ -3,8 +3,8 @@ import OSLog
 
 public enum DirectStreamTelemetry {
     private static let queue = DispatchQueue(label: "CamBar.direct-telemetry")
-    private static let enabled = ProcessInfo.processInfo.environment["CAMBAR_DIAGNOSTICS"] == "1"
     private static let logger = Logger(subsystem: "com.cambar", category: "stream")
+    private static let maximumLogBytes: UInt64 = 512 * 1_024
 
     public static var logURL: URL {
         StreamSourceResolver.makeCacheFolderURL(namespace: "direct")
@@ -12,13 +12,8 @@ public enum DirectStreamTelemetry {
     }
 
     public static func reset() {
-        guard enabled else { return }
         queue.sync {
-            try? FileManager.default.createDirectory(
-                at: logURL.deletingLastPathComponent(),
-                withIntermediateDirectories: true
-            )
-            try? Data().write(to: logURL, options: .atomic)
+            prepareLogFile()
         }
     }
 
@@ -38,8 +33,8 @@ public enum DirectStreamTelemetry {
         if let safeDetail { message += " detail=\(safeDetail)" }
         logger.info("\(message, privacy: .public)")
 
-        guard enabled else { return }
         queue.async {
+            prepareLogFile()
             var fields: [String: Any] = [
                 "time": ISO8601DateFormatter().string(from: Date()),
                 "uptime_ms": Int(ProcessInfo.processInfo.systemUptime * 1_000),
@@ -77,7 +72,17 @@ public enum DirectStreamTelemetry {
     }
 
     public static func flush() {
-        guard enabled else { return }
         queue.sync {}
+    }
+
+    private static func prepareLogFile() {
+        try? FileManager.default.createDirectory(
+            at: logURL.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        let size = (try? logURL.resourceValues(forKeys: [.fileSizeKey]).fileSize).map(UInt64.init) ?? 0
+        if size >= maximumLogBytes {
+            try? Data().write(to: logURL, options: .atomic)
+        }
     }
 }
