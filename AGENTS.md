@@ -1,3 +1,7 @@
+---
+written_by: ai
+---
+
 # CamBar Agent Guide
 
 Purpose: one-stop shop for agents to develop + debug CamBar fast.
@@ -10,10 +14,11 @@ Purpose: one-stop shop for agents to develop + debug CamBar fast.
 
 ## What CamBar is
 - Tiny macOS menubar RTSP viewer.
-- Pipeline: RTSP camera -> bundled go2rtc -> direct WebKit video surface.
+- Pipeline: RTSP camera → IPCamKit → hardware VideoToolbox decode → native video surface.
 - Stream policy:
   - the main stream `/Streaming/Channels/101` is warmed at launch/login
-  - normal playback must not use ffmpeg, HLS files, or AVPlayer
+  - retain only the newest decoded frame; never accumulate a playback queue
+  - normal playback must not use go2rtc, WebKit, ffmpeg, HLS files or AVPlayer
   - old fallback playback paths should be deleted, not preserved
 
 ## 60-second bootstrap
@@ -36,18 +41,22 @@ RTSP resolution order:
   - app lifecycle, menubar app wiring
 - `Sources/CamBar/ContentView.swift`
   - minimal popover UI
-- `Sources/CamBar/Go2RTCVideoView.swift`
-  - direct live video WebKit surfaces with fixed ownership; menu and popout are never reparented
+- `Sources/CamBar/CameraStreamController.swift` + `VideoToolboxDecoder.swift`
+  - one app-lifetime RTSP session, hardware H.264 decode, latest-frame cache and reconnect supervision
+- `Sources/CamBar/CameraPlaybackController.swift` + `CameraVideoView.swift`
+  - fixed native menu and popout surfaces; the surfaces are never reparented and never own the stream
 - `Sources/CamBarCore/PopoverPresentationState.swift`
   - fail-closed popover intent/callback reducer
 - `Sources/CamBar/CameraWindowController.swift`
   - large/popout window behavior
-- `Sources/CamBar/Go2RTCRelayController.swift`
-  - bundled go2rtc lifecycle and localhost config
 - `Sources/CamBarCore/StreamSourceResolver.swift`
-  - URL/config parsing and executable path resolution
+  - URL/config parsing and credential redaction
+- `Sources/CamBarCore/NativeStreamPolicy.swift`
+  - cached-frame freshness, post-click frame acceptance, reconnect delay and AVCC packetisation
 - `Sources/CamBarCore/DirectStreamTelemetry.swift`
   - local JSONL timing log
+- `Vendor/IPCamKit`
+  - pinned IPCamKit 0.3.1 source plus CamBar's immediate socket-abort extension
 - `Tests/CamBarTests/CamBarTests.swift`
   - resolver + behavior tests
 
@@ -69,7 +78,7 @@ nc -zv 192.168.1.249 554
 Interpretation:
 - ping fails -> routing/ACL/subnet-router problem
 - ping ok + port fails -> camera/RTSP path/firewall problem
-- ping ok + port ok + app fails -> CamBar/go2rtc/WebKit app logic
+- ping ok + port ok + app fails -> CamBar RTSP/decode/presentation logic
 
 ## Travel/remote notes (Tailscale)
 - Subnet router != exit node.

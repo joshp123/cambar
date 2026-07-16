@@ -4,7 +4,6 @@ set -euo pipefail
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 APP="$HOME/Applications/CamBar.app"
 EXECUTABLE="$APP/Contents/MacOS/CamBar"
-HELPER="$APP/Contents/Resources/bin/go2rtc"
 LOG="$HOME/Library/Caches/CamBar/direct/direct-stream-events.jsonl"
 
 fail() {
@@ -19,9 +18,6 @@ fail() {
 if pgrep -f "$EXECUTABLE" >/dev/null; then
   fail "CamBar is already running"
 fi
-if pgrep -f "$HELPER" >/dev/null; then
-  fail "CamBar's bundled go2rtc is already running without the app"
-fi
 
 PREVIOUS_SESSION=""
 if [[ -f "$LOG" ]]; then
@@ -31,7 +27,6 @@ cleanup_failed_canary() {
   local exit_code=$?
   trap - EXIT INT TERM
   pkill -f "$EXECUTABLE" >/dev/null 2>&1 || true
-  pkill -f "$HELPER" >/dev/null 2>&1 || true
   exit "$exit_code"
 }
 trap cleanup_failed_canary EXIT INT TERM
@@ -68,4 +63,3 @@ trap - EXIT INT TERM
 echo "Automatic presentation canary passed; CamBar is running."
 echo "Manually click the status icon twice and confirm it opens once, then closes once."
 echo "Emergency stop: pkill -f '$EXECUTABLE'"
-echo "Then stop its helper: pkill -f '$HELPER'"

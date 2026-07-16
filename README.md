@@ -16,12 +16,12 @@ written_by: ai
 
 - **Menubar first.** A lightweight popover for quick checks, plus a full window when needed.
 - **Launches at login.** Once opened as a packaged app, CamBar registers itself with macOS Login Items.
-- **No cloud.** Everything is local: RTSP camera -> bundled go2rtc -> direct live video surface.
+- **No cloud.** Everything is local: RTSP camera → native hardware decoder → native video surface.
 - **Boring by design.** No auth flows, no accounts, no fluff. Just the camera.
 
 ## What it does
 
-CamBar reads your RTSP URL from `CAMBAR_RTSP_URL` or `~/.config/camsnap/config.yaml`, starts bundled `go2rtc`, and keeps the main RTSP producer connected at launch/login. Opening the menu creates one visible WebRTC player; closing it destroys that player. Normal playback does not use `ffmpeg`, HLS files, or AVPlayer.
+CamBar reads your RTSP URL from `CAMBAR_RTSP_URL` or `~/.config/camsnap/config.yaml`. At launch it opens one RTSP session, decodes H.264 with VideoToolbox and retains only the newest decoded frame. Opening either camera surface presents that current frame and then the advancing stream. There is no transcoding, browser process, local HTTP server, disk segment cache or duplicate camera connection.
 
 ## Why
 
@@ -30,9 +30,9 @@ I wanted to know when the postman is at the door. The vendor app for this camera
 ## First run
 
 - Install CamBar at `~/Applications/CamBar.app`, then launch it once.
-- Open the menubar popover after the relay reports ready.
+- Open the menubar popover after CamBar has started.
 - Set `CAMBAR_RTSP_URL` if you want to override camera discovery.
-- First-frame latency depends on WebRTC setup and the camera's keyframe interval.
+- A launch may need to wait for the camera's next keyframe. Once warmed, opening the menu does not reconnect or wait for another keyframe.
 - macOS may show CamBar under System Settings -> General -> Login Items if approval is needed.
 
 ## Requirements
@@ -40,7 +40,7 @@ I wanted to know when the postman is at the door. The vendor app for this camera
 - macOS 27
 - A reachable RTSP camera
 
-If you build from source, `go2rtc` must be on `PATH` at package time and is bundled into the app. The repo's `devenv.nix` provides it.
+The RTSP client is vendored from IPCamKit 0.3.1 under `Vendor/IPCamKit`. CamBar adds one small fault-recovery API that closes a stuck RTSP socket immediately instead of waiting for TEARDOWN. The app has no external runtime helper.
 
 ## Build and test
 
@@ -63,15 +63,15 @@ If neither source is available, the popover reports that the camera is unavailab
 
 ## Packaging
 
-`Scripts/package_app.sh` requires `go2rtc` on `PATH` and stages a signed app containing the helper. To test, stage and install it:
+`Scripts/package_app.sh` stages and signs the app. To test, stage and install it:
 
 ```bash
-nix shell nixpkgs#go2rtc -c ./Scripts/compile_and_run.sh --test
+./Scripts/compile_and_run.sh --test
 ./Scripts/deploy_app.sh
 ./Scripts/presentation_canary.sh
 ```
 
-Deployment refuses a dirty tree, a stale bundle, a running copy of CamBar, a changed signing identity or a failed safety check. It does not launch the app. The separate canary launches in the background, waits five seconds and stops CamBar if it presents a menu or window without user input. Timing and playback events are stored in a capped 512 KB log under `~/Library/Caches/CamBar/direct/`.
+Deployment refuses a dirty tree, a stale bundle, a running copy of CamBar, a changed signing identity or a failed safety check. It does not launch the app. The separate canary launches in the background, waits five seconds and stops CamBar if it presents a menu or window without user input. Timing and playback events are stored in a capped 4 MB log under `~/Library/Caches/CamBar/direct/`.
 
 ## Zero to MVP (anonymized prompts)
 
@@ -128,9 +128,9 @@ Repo: CamBar
 What the app does:
 - Menubar popover with live feed
 - Optional full-size window
-- Bundles go2rtc and keeps the main RTSP producer connected at app launch/login
-- Creates playback only while a camera surface is visible; no hidden decoder
-- Uses direct WebRTC playback; no normal-path ffmpeg/HLS/AVPlayer
+- Keeps one native RTSP and hardware-decoder session warm at app launch/login
+- Retains only the latest decoded frame; no frame queue or disk cache
+- Uses native video surfaces; no go2rtc, WebKit, ffmpeg, HLS or AVPlayer
 
 What I need you to do:
 1) Build, test and stage the app

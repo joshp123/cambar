@@ -10,14 +10,8 @@ private let telemetryURL = FileManager.default.homeDirectoryForCurrentUser
     .appendingPathComponent("Library/Caches/CamBar/direct/direct-stream-events.jsonl")
 
 private struct Options {
-    enum InputMode: Equatable {
-        case accessibility
-        case physical
-    }
-
     var reopenCycles = 3
     var firstOpenIdleSeconds: TimeInterval = 35
-    var inputMode = InputMode.accessibility
     var screenshotPath = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
         .appendingPathComponent(".build/smoke-ui-popover.png").path
 
@@ -42,13 +36,13 @@ private struct Options {
             case "--first-open-idle":
                 guard let value = arguments.first,
                       let seconds = TimeInterval(value),
-                      seconds >= 0 else {
-                    throw SmokeError.message("--first-open-idle requires a non-negative number of seconds")
+                      seconds >= 6 else {
+                    throw SmokeError.message("--first-open-idle requires at least 6 seconds")
                 }
                 result.firstOpenIdleSeconds = seconds
                 arguments.removeFirst()
             case "--physical-clicks":
-                result.inputMode = .physical
+                break
             case "-h", "--help":
                 print("Usage: smoke_ui.sh [--reopen-cycles COUNT] [--first-open-idle SECONDS] [--screenshot PATH] [--physical-clicks]")
                 exit(0)
@@ -80,16 +74,30 @@ private func assertCamBarIsNotFrontmost(_ context: String) throws {
 }
 
 private struct TelemetryEvent: Decodable {
+    let schemaVersion: Int?
+    let sequence: Int?
     let sessionID: String
     let component: String
     let event: String
     let surface: String?
+    let openID: String?
+    let videoSessionID: String?
+    let uptimeMilliseconds: Int
+    let elapsedMilliseconds: Int?
+    let detail: String?
 
     enum CodingKeys: String, CodingKey {
+        case schemaVersion = "schema_version"
+        case sequence
         case sessionID = "session_id"
         case component
         case event
         case surface
+        case openID = "open_id"
+        case videoSessionID = "video_session_id"
+        case uptimeMilliseconds = "uptime_ms"
+        case elapsedMilliseconds = "elapsed_ms"
+        case detail
     }
 }
 
@@ -117,15 +125,42 @@ private final class TelemetryReader {
 
     func events() throws -> [TelemetryEvent] {
         guard let sessionID else { return [] }
-        return try allEvents().filter { $0.sessionID == sessionID }
+        let sessionEvents = try allEvents().filter { $0.sessionID == sessionID }
+        guard let first = sessionEvents.first,
+              first.event == "launch",
+              first.schemaVersion == 2,
+              first.sequence == 1 else {
+            throw SmokeError.message("active telemetry session does not start with schema-v2 launch sequence 1")
+        }
+        for (prior, current) in zip(sessionEvents, sessionEvents.dropFirst()) {
+            guard current.schemaVersion == 2,
+                  let priorSequence = prior.sequence,
+                  let currentSequence = current.sequence,
+                  currentSequence == priorSequence + 1 else {
+                throw SmokeError.message(
+                    "active telemetry sequence gap after \(prior.sequence.map { String($0) } ?? "missing")"
+                )
+            }
+        }
+        return sessionEvents
     }
 
     func count(_ event: String, component: String? = nil, surface: String? = nil) throws -> Int {
+        try matchingEvents(event, component: component, surface: surface).count
+    }
+
+    func matchingEvents(
+        _ event: String,
+        component: String? = nil,
+        surface: String? = nil,
+        openID: String? = nil
+    ) throws -> [TelemetryEvent] {
         try events().filter {
             $0.event == event
                 && (component == nil || $0.component == component)
                 && (surface == nil || $0.surface == surface)
-        }.count
+                && (openID == nil || $0.openID == openID)
+        }
     }
 
     func waitForCount(
@@ -140,9 +175,45 @@ private final class TelemetryReader {
         }
     }
 
+    func waitForEvent(
+        _ event: String,
+        timeout: TimeInterval,
+        component: String? = nil,
+        surface: String? = nil,
+        openID: String? = nil,
+        afterUptimeMilliseconds: Int? = nil
+    ) throws -> TelemetryEvent {
+        var result: TelemetryEvent?
+        try wait(timeout: timeout, description: event) { _ in
+            result = try self.matchingEvents(
+                event,
+                component: component,
+                surface: surface,
+                openID: openID
+            ).last(where: {
+                guard let afterUptimeMilliseconds else { return true }
+                return $0.uptimeMilliseconds >= afterUptimeMilliseconds
+            })
+            return result != nil
+        }
+        guard let result else {
+            throw SmokeError.message("timed out waiting for \(event)")
+        }
+        return result
+    }
+
     func assertNoFailures() throws {
-        for forbidden in ["recover", "black_frame_suspected", "frame_sample_failed"] {
-            let matches = try count(forbidden, surface: "menu")
+        for forbidden in [
+            "session_reconnecting",
+            "stream_stalled",
+            "decode_submission_failed",
+            "decode_callback_failed",
+            "frame_enqueue_failed",
+            "visible_frame_timeout",
+            "open_frame_deadline_exceeded",
+            "surface_recovery_started",
+        ] {
+            let matches = try count(forbidden)
             guard matches == 0 else {
                 throw SmokeError.message("telemetry recorded \(matches) \(forbidden) event(s)")
             }
@@ -150,10 +221,6 @@ private final class TelemetryReader {
         let activations = try count("app_activated", component: "app")
         guard activations == 0 else {
             throw SmokeError.message("telemetry recorded \(activations) CamBar activation event(s)")
-        }
-        let relayRetries = try count("waiting_to_retry", component: "relay")
-        guard relayRetries == 0 else {
-            throw SmokeError.message("telemetry recorded \(relayRetries) relay retry event(s)")
         }
     }
 
@@ -174,45 +241,108 @@ private final class TelemetryReader {
     private func allEvents() throws -> [TelemetryEvent] {
         guard FileManager.default.fileExists(atPath: telemetryURL.path) else { return [] }
         let contents = try String(contentsOf: telemetryURL, encoding: .utf8)
-        return contents.split(separator: "\n").compactMap { line in
-            try? decoder.decode(TelemetryEvent.self, from: Data(line.utf8))
+        var lines = contents.split(separator: "\n", omittingEmptySubsequences: true)
+        if !contents.hasSuffix("\n"), !lines.isEmpty {
+            lines.removeLast()
+        }
+        return try lines.enumerated().map { index, line in
+            do {
+                return try decoder.decode(TelemetryEvent.self, from: Data(line.utf8))
+            } catch {
+                throw SmokeError.message("malformed telemetry row \(index + 1): \(error)")
+            }
         }
     }
 }
 
 private final class StatusItemDriver {
     private let processIdentifier: pid_t
-    private var statusElement: AXUIElement?
 
     init(processIdentifier: pid_t) {
         self.processIdentifier = processIdentifier
     }
 
     func waitForFrame(timeout: TimeInterval) throws -> CGRect {
+        try waitForFrame(identifier: statusItemIdentifier, timeout: timeout)
+    }
+
+    func waitForFrame(identifier: String, timeout: TimeInterval) throws -> CGRect {
         let deadline = Date().addingTimeInterval(timeout)
         repeat {
-            if let element = findStatusItem(), let frame = frame(of: element), !frame.isEmpty {
-                statusElement = element
+            if let element = findElement(identifier: identifier),
+               let frame = frame(of: element),
+               !frame.isEmpty {
                 return frame
             }
             RunLoop.current.run(until: Date().addingTimeInterval(0.1))
         } while Date() < deadline
-        throw SmokeError.message("could not locate AX identifier \(statusItemIdentifier)")
+        throw SmokeError.message("could not locate AX identifier \(identifier)")
     }
 
-    func click(frame: CGRect, inputMode: Options.InputMode) throws {
-        if inputMode == .physical {
-            try clickPhysically(frame: frame)
-            return
+    func click(frame: CGRect) throws {
+        try clickPhysically(frame: frame)
+    }
+
+    func clickBurst(frame: CGRect, count: Int = 2) throws {
+        precondition(count >= 2)
+        let originalLocation = CGEvent(source: nil)?.location ?? NSEvent.mouseLocation
+        defer { CGWarpMouseCursorPosition(originalLocation) }
+        let target = CGPoint(x: frame.midX, y: frame.midY)
+        guard let source = CGEventSource(stateID: .hidSystemState),
+              let moved = CGEvent(
+                mouseEventSource: source,
+                mouseType: .mouseMoved,
+                mouseCursorPosition: target,
+                mouseButton: .left
+              ) else {
+            throw SmokeError.message("could not construct physical burst mouse events")
         }
-        guard let statusElement else {
-            throw SmokeError.message("status item accessibility element was not retained")
+        moved.post(tap: .cghidEventTap)
+        usleep(20_000)
+        let movedLocation = CGEvent(source: nil)?.location ?? NSEvent.mouseLocation
+        guard frame.insetBy(dx: -2, dy: -2).contains(movedLocation) else {
+            throw SmokeError.message("cursor move missed status item before physical burst")
         }
-        let result = AXUIElementPerformAction(statusElement, kAXPressAction as CFString)
-        guard result == .success else {
-            throw SmokeError.message("status item AX press failed with error \(result.rawValue)")
+        for _ in 0..<count {
+            guard let down = CGEvent(
+                mouseEventSource: source,
+                mouseType: .leftMouseDown,
+                mouseCursorPosition: target,
+                mouseButton: .left
+            ), let up = CGEvent(
+                mouseEventSource: source,
+                mouseType: .leftMouseUp,
+                mouseCursorPosition: target,
+                mouseButton: .left
+            ) else {
+                throw SmokeError.message("could not construct physical burst mouse events")
+            }
+            down.post(tap: .cghidEventTap)
+            usleep(5_000)
+            up.post(tap: .cghidEventTap)
+            usleep(5_000)
         }
-        print("Pressed status item frame=\(NSStringFromRect(frame))")
+        usleep(40_000)
+        print("Physically burst-clicked status item count=\(count) frame=\(NSStringFromRect(frame))")
+    }
+
+    func closeFirstWindow() throws {
+        let application = AXUIElementCreateApplication(processIdentifier)
+        guard let window = elementsAttribute(kAXWindowsAttribute as String, of: application).first else {
+            throw SmokeError.message("CamBar popout window was not exposed through Accessibility")
+        }
+        var value: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(
+            window,
+            kAXCloseButtonAttribute as CFString,
+            &value
+        ) == .success,
+        let closeButton = value as! AXUIElement? else {
+            throw SmokeError.message("CamBar popout close button was unavailable")
+        }
+        guard AXUIElementPerformAction(closeButton, kAXPressAction as CFString) == .success else {
+            throw SmokeError.message("CamBar popout close button could not be pressed")
+        }
     }
 
     private func clickPhysically(frame: CGRect) throws {
@@ -255,7 +385,7 @@ private final class StatusItemDriver {
         print("Physically clicked status item frame=\(NSStringFromRect(frame))")
     }
 
-    private func findStatusItem() -> AXUIElement? {
+    private func findElement(identifier: String) -> AXUIElement? {
         let application = AXUIElementCreateApplication(processIdentifier)
         var queue: [(AXUIElement, Int)] = [(application, 0)]
         var visited = Set<CFHashCode>()
@@ -267,7 +397,7 @@ private final class StatusItemDriver {
             guard visited.insert(hash).inserted else { continue }
             inspected += 1
 
-            if stringAttribute(kAXIdentifierAttribute as String, of: element) == statusItemIdentifier {
+            if stringAttribute(kAXIdentifierAttribute as String, of: element) == identifier {
                 return element
             }
             guard depth < 12 else { continue }
@@ -335,11 +465,40 @@ private func runProcess(_ executable: String, _ arguments: [String], allowFailur
     }
 }
 
+private struct ProcessResourceSnapshot {
+    let processIdentifier: pid_t
+    let residentBytes: UInt64
+    let cpuNanoseconds: UInt64
+    let threadCount: Int32
+
+    func summary(prefix: String) -> String {
+        String(
+            format: "%@ resource pid=%d resident_mb=%.1f cpu_seconds=%.3f threads=%d",
+            prefix,
+            processIdentifier,
+            Double(residentBytes) / 1_048_576,
+            Double(cpuNanoseconds) / 1_000_000_000,
+            threadCount
+        )
+    }
+
+    func delta(from baseline: ProcessResourceSnapshot) -> String? {
+        guard processIdentifier == baseline.processIdentifier,
+              cpuNanoseconds >= baseline.cpuNanoseconds else { return nil }
+        return String(
+            format: "IDLE_DELTA resource pid=%d resident_mb=%+.1f cpu_seconds=+%.3f threads=%+d",
+            processIdentifier,
+            (Double(residentBytes) - Double(baseline.residentBytes)) / 1_048_576,
+            Double(cpuNanoseconds - baseline.cpuNanoseconds) / 1_000_000_000,
+            threadCount - baseline.threadCount
+        )
+    }
+}
+
 private final class OwnedProcesses {
     private let appURL: URL
     private let pidFileURL: URL
     private(set) var appPID: pid_t?
-    private var helperPIDs = Set<pid_t>()
 
     init(appURL: URL, pidFileURL: URL) {
         self.appURL = appURL
@@ -356,50 +515,41 @@ private final class OwnedProcesses {
         try writePIDFile()
     }
 
-    func waitForHelper(timeout: TimeInterval) throws {
+    func assertNoChildProcesses() throws {
         guard let appPID else { throw SmokeError.message("CamBar PID was not registered") }
-        let expectedPath = appURL.appendingPathComponent("Contents/Resources/bin/go2rtc").standardizedFileURL.path
-        let deadline = Date().addingTimeInterval(timeout)
-        repeat {
-            let matches = directChildren(of: appPID).filter { processPath($0) == expectedPath }
-            if !matches.isEmpty {
-                helperPIDs.formUnion(matches)
-                try writePIDFile()
-                return
-            }
-            RunLoop.current.run(until: Date().addingTimeInterval(0.05))
-        } while Date() < deadline
-        throw SmokeError.message("bundled go2rtc did not appear as a direct CamBar child")
+        let children = directChildren(of: appPID)
+        guard children.isEmpty else {
+            throw SmokeError.message("native CamBar spawned child process(es): \(children)")
+        }
     }
 
-    func refreshHelpers() throws {
-        guard let appPID else { return }
-        let expectedPath = appURL.appendingPathComponent("Contents/Resources/bin/go2rtc").standardizedFileURL.path
-        helperPIDs.formUnion(directChildren(of: appPID).filter { processPath($0) == expectedPath })
-        try writePIDFile()
+    func resourceSnapshot() throws -> ProcessResourceSnapshot {
+        guard let appPID, processPath(appPID) == appExecutablePath else {
+            throw SmokeError.message("CamBar process is unavailable for resource sampling")
+        }
+        var info = proc_taskinfo()
+        let expectedSize = Int32(MemoryLayout<proc_taskinfo>.size)
+        let actualSize = proc_pidinfo(appPID, PROC_PIDTASKINFO, 0, &info, expectedSize)
+        guard actualSize == expectedSize else {
+            throw SmokeError.message("could not sample CamBar process resources")
+        }
+        return ProcessResourceSnapshot(
+            processIdentifier: appPID,
+            residentBytes: info.pti_resident_size,
+            cpuNanoseconds: info.pti_total_user + info.pti_total_system,
+            threadCount: info.pti_threadnum
+        )
     }
 
     func terminate() {
-        try? refreshHelpers()
         if let appPID,
            processPath(appPID) == appExecutablePath,
            let application = NSRunningApplication(processIdentifier: appPID) {
             application.terminate()
         }
         usleep(500_000)
-        let verifiedHelpers = helperPIDs.filter { processPath($0) == helperExecutablePath }
-        let verifiedApp: pid_t? = if let appPID, processPath(appPID) == appExecutablePath {
-            appPID
-        } else {
-            nil
-        }
-        let pids = Set(verifiedHelpers).union(verifiedApp.map { [$0] } ?? [])
-        for pid in pids {
-            Darwin.kill(pid, SIGTERM)
-        }
-        usleep(200_000)
-        for pid in pids where processPath(pid) == appExecutablePath || processPath(pid) == helperExecutablePath {
-            Darwin.kill(pid, SIGKILL)
+        if let appPID, processPath(appPID) == appExecutablePath {
+            Darwin.kill(appPID, SIGKILL)
         }
     }
 
@@ -407,33 +557,26 @@ private final class OwnedProcesses {
         appURL.appendingPathComponent("Contents/MacOS/CamBar").standardizedFileURL.path
     }
 
-    private var helperExecutablePath: String {
-        appURL.appendingPathComponent("Contents/Resources/bin/go2rtc").standardizedFileURL.path
-    }
-
     private func writePIDFile() throws {
-        var lines: [String] = []
-        if let appPID {
-            lines.append("app \(appPID) 0")
-        }
-        for helperPID in helperPIDs.sorted() {
-            lines.append("helper \(helperPID) \(appPID ?? 0)")
-        }
-        let contents = lines.isEmpty ? "" : lines.joined(separator: "\n") + "\n"
+        let contents = appPID.map { "app \($0) 0\n" } ?? ""
         try contents.write(to: pidFileURL, atomically: true, encoding: .utf8)
     }
 
     private func directChildren(of parentPID: pid_t) -> [pid_t] {
-        let requiredCount = proc_listchildpids(parentPID, nil, 0)
-        guard requiredCount > 0 else { return [] }
-        var children = [pid_t](repeating: 0, count: Int(requiredCount) + 8)
-        let count = proc_listchildpids(
-            parentPID,
-            &children,
-            Int32(children.count * MemoryLayout<pid_t>.size)
-        )
-        guard count > 0 else { return [] }
-        return Array(children.prefix(min(Int(count), children.count))).filter { $0 > 0 }
+        var capacity = 16
+        while true {
+            var children = [pid_t](repeating: 0, count: capacity)
+            let count = proc_listchildpids(
+                parentPID,
+                &children,
+                Int32(children.count * MemoryLayout<pid_t>.size)
+            )
+            guard count > 0 else { return [] }
+            if Int(count) < capacity {
+                return Array(children.prefix(Int(count))).filter { $0 > 0 }
+            }
+            capacity = max(capacity * 2, Int(count) + 16)
+        }
     }
 
     private func processPath(_ pid: pid_t) -> String? {
@@ -494,68 +637,73 @@ private func capturePopoverScreenshot(processIdentifier: pid_t, path: String) th
           (values.fileSize ?? 0) > 0 else {
         throw SmokeError.message("required popover screenshot was not freshly written")
     }
-    let darkRatio = try centralDarkPixelRatio(at: outputURL)
-    guard darkRatio <= 0.98 else {
-        throw SmokeError.message(
-            String(format: "composited popover screenshot is effectively black (dark_ratio=%.4f)", darkRatio)
-        )
-    }
-    print(String(format: "Screenshot: %@ (central dark_ratio=%.4f)", outputURL.path, darkRatio))
+    try assertScreenshotContainsVideo(outputURL)
+    print("Screenshot visual artifact: \(outputURL.path)")
 }
 
-private func centralDarkPixelRatio(at url: URL) throws -> Double {
-    guard let image = NSImage(contentsOf: url),
-          let source = image.cgImage(forProposedRect: nil, context: nil, hints: nil) else {
-        throw SmokeError.message("required popover screenshot could not be decoded")
+private func assertScreenshotContainsVideo(_ url: URL) throws {
+    guard let data = try? Data(contentsOf: url),
+          let bitmap = NSBitmapImageRep(data: data),
+          bitmap.pixelsWide > 20,
+          bitmap.pixelsHigh > 20 else {
+        throw SmokeError.message("could not decode screenshot for black-frame analysis")
     }
-    let crop = CGRect(
-        x: CGFloat(source.width) * 0.1,
-        y: CGFloat(source.height) * 0.1,
-        width: CGFloat(source.width) * 0.8,
-        height: CGFloat(source.height) * 0.8
-    ).integral
-    guard let centralImage = source.cropping(to: crop) else {
-        throw SmokeError.message("could not crop the required popover screenshot")
-    }
-    let width = 64
-    let height = 36
-    var pixels = [UInt8](repeating: 0, count: width * height * 4)
-    guard let context = CGContext(
-        data: &pixels,
-        width: width,
-        height: height,
-        bitsPerComponent: 8,
-        bytesPerRow: width * 4,
-        space: CGColorSpaceCreateDeviceRGB(),
-        bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
-    ) else {
-        throw SmokeError.message("could not create screenshot analysis context")
-    }
-    context.interpolationQuality = .medium
-    context.draw(centralImage, in: CGRect(x: 0, y: 0, width: width, height: height))
-    var darkPixels = 0
-    for index in stride(from: 0, to: pixels.count, by: 4) {
-        if max(pixels[index], pixels[index + 1], pixels[index + 2]) < 16 {
-            darkPixels += 1
+    var luminances: [Double] = []
+    for row in 1...18 {
+        for column in 1...32 {
+            let x = column * (bitmap.pixelsWide - 1) / 33
+            let y = row * (bitmap.pixelsHigh - 1) / 19
+            guard let color = bitmap.colorAt(x: x, y: y)?.usingColorSpace(.deviceRGB) else { continue }
+            luminances.append(
+                0.2126 * Double(color.redComponent)
+                    + 0.7152 * Double(color.greenComponent)
+                    + 0.0722 * Double(color.blueComponent)
+            )
         }
     }
-    return Double(darkPixels) / Double(width * height)
+    guard !luminances.isEmpty else {
+        throw SmokeError.message("screenshot contained no sampleable pixels")
+    }
+    let mean = luminances.reduce(0, +) / Double(luminances.count)
+    let variance = luminances.reduce(0) { $0 + pow($1 - mean, 2) } / Double(luminances.count)
+    let nonBlackFraction = Double(luminances.filter { $0 > 0.04 }.count) / Double(luminances.count)
+    guard nonBlackFraction >= 0.10, sqrt(variance) >= 0.02 else {
+        throw SmokeError.message(
+            String(
+                format: "screenshot failed video-content check (nonblack=%.2f contrast=%.3f)",
+                nonBlackFraction,
+                sqrt(variance)
+            )
+        )
+    }
+}
+
+private func screenshotPath(for cycle: Int, basePath: String) -> String {
+    guard cycle > 1 else { return basePath }
+    let url = URL(fileURLWithPath: basePath)
+    let pathExtension = url.pathExtension
+    let baseName = url.deletingPathExtension().lastPathComponent
+    let fileName = pathExtension.isEmpty
+        ? "\(baseName)-cycle-\(cycle)"
+        : "\(baseName)-cycle-\(cycle).\(pathExtension)"
+    return url.deletingLastPathComponent().appendingPathComponent(fileName).path
 }
 
 private func assertExactCounts(
     telemetry: TelemetryReader,
-    opens: Int,
+    statusClicks: Int,
+    presentationRequests: Int,
+    playbackOpens: Int,
     closes: Int
 ) throws {
     let expectations: [(String, Int)] = [
-        ("status_click", opens + closes),
-        ("menu_open_requested", opens),
-        ("presentation_started", opens),
-        ("session_started", opens),
-        ("live_view", opens),
-        ("frame_sample", opens),
+        ("status_click", statusClicks),
+        ("menu_open_requested", presentationRequests),
+        ("playback_open_started", playbackOpens),
+        ("cover_shown", playbackOpens),
+        ("cover_hidden", playbackOpens),
+        ("live_view", playbackOpens),
         ("menu_closed", closes),
-        ("session_stopped", closes),
     ]
     for (event, expected) in expectations {
         let actual = try telemetry.count(event, surface: "menu")
@@ -563,7 +711,138 @@ private func assertExactCounts(
             throw SmokeError.message("expected exactly \(expected) \(event) event(s), found \(actual)")
         }
     }
+    let sessionsStarted = try telemetry.count("session_started", component: "stream")
+    guard sessionsStarted == 1 else {
+        throw SmokeError.message("expected exactly one app-owned stream generation, found \(sessionsStarted)")
+    }
+    let sessionsStopped = try telemetry.count("session_stopped", component: "stream")
+    guard sessionsStopped == 0 else {
+        throw SmokeError.message("app-owned stream stopped \(sessionsStopped) time(s)")
+    }
     try telemetry.assertNoFailures()
+}
+
+private func requireOpenEvent(
+    _ eventName: String,
+    openID: String,
+    videoSessionID: String,
+    after statusClick: TelemetryEvent,
+    telemetry: TelemetryReader,
+    timeout: TimeInterval = 3
+) throws -> TelemetryEvent {
+    let event = try telemetry.waitForEvent(
+        eventName,
+        timeout: timeout,
+        component: "video",
+        surface: "menu",
+        openID: openID,
+        afterUptimeMilliseconds: statusClick.uptimeMilliseconds
+    )
+    guard event.videoSessionID == videoSessionID else {
+        let actualSessionID = event.videoSessionID ?? "missing"
+        throw SmokeError.message(
+            "\(eventName) for open \(openID) used video session \(actualSessionID), "
+                + "expected \(videoSessionID)"
+        )
+    }
+    return event
+}
+
+private struct WarmOpenResult {
+    let openID: String
+    let elapsedMilliseconds: Int
+}
+
+private func requireWarmOpen(
+    after statusClick: TelemetryEvent,
+    videoSessionID: String,
+    telemetry: TelemetryReader
+) throws -> WarmOpenResult {
+    guard let openID = statusClick.openID else {
+        throw SmokeError.message("opening status_click had no open_id")
+    }
+    _ = try telemetry.waitForEvent(
+        "menu_open_requested",
+        timeout: 3,
+        component: "app",
+        surface: "menu",
+        openID: openID,
+        afterUptimeMilliseconds: statusClick.uptimeMilliseconds
+    )
+    let playbackOpen = try requireOpenEvent(
+        "playback_open_started",
+        openID: openID,
+        videoSessionID: videoSessionID,
+        after: statusClick,
+        telemetry: telemetry
+    )
+    _ = try requireOpenEvent(
+        "cover_shown",
+        openID: openID,
+        videoSessionID: videoSessionID,
+        after: statusClick,
+        telemetry: telemetry
+    )
+    let liveView = try requireOpenEvent(
+        "live_view",
+        openID: openID,
+        videoSessionID: videoSessionID,
+        after: statusClick,
+        telemetry: telemetry
+    )
+    _ = try requireOpenEvent(
+        "cover_hidden",
+        openID: openID,
+        videoSessionID: videoSessionID,
+        after: statusClick,
+        telemetry: telemetry
+    )
+    guard let elapsedMilliseconds = liveView.elapsedMilliseconds,
+          (0...500).contains(elapsedMilliseconds) else {
+        let actualElapsed = liveView.elapsedMilliseconds.map { String($0) } ?? "missing"
+        throw SmokeError.message(
+            "open \(openID) live_view elapsed_ms was \(actualElapsed); expected at most 500"
+        )
+    }
+    let observedElapsed = liveView.uptimeMilliseconds - statusClick.uptimeMilliseconds
+    guard (0...500).contains(observedElapsed),
+          playbackOpen.uptimeMilliseconds >= statusClick.uptimeMilliseconds else {
+        throw SmokeError.message(
+            "open \(openID) telemetry spanned \(observedElapsed) ms "
+                + "from status_click to live_view; expected at most 500"
+        )
+    }
+    for indicator in try telemetry.matchingEvents(
+        "connection_indicator_shown",
+        component: "video",
+        surface: "menu",
+        openID: openID
+    ) where indicator.videoSessionID != videoSessionID {
+        throw SmokeError.message("connection_indicator_shown was attributed to the wrong video session")
+    }
+    return WarmOpenResult(openID: openID, elapsedMilliseconds: elapsedMilliseconds)
+}
+
+private func detailInteger(_ key: String, in event: TelemetryEvent) -> Int? {
+    event.detail?
+        .split(whereSeparator: { $0.isWhitespace })
+        .first(where: { $0.hasPrefix("\(key)=") })
+        .flatMap { Int($0.dropFirst(key.count + 1)) }
+}
+
+private func assertAdvancingHeartbeat(_ event: TelemetryEvent, generation: String) throws {
+    guard event.videoSessionID == generation,
+          let intervalFrames = detailInteger("interval_frames", in: event),
+          intervalFrames > 0 else {
+        throw SmokeError.message("frame_heartbeat did not report advancing frames for generation \(generation)")
+    }
+}
+
+private func percentile(_ values: [Int], _ fraction: Double) -> Int {
+    precondition(!values.isEmpty)
+    let sorted = values.sorted()
+    let rank = max(1, Int(ceil(fraction * Double(sorted.count))))
+    return sorted[min(rank - 1, sorted.count - 1)]
 }
 
 private func run() throws {
@@ -599,30 +878,196 @@ private func run() throws {
     try runProcess("/usr/bin/open", ["-g", "-j", "-n", appURL.path])
     let application = try waitForCamBar(appURL: appURL, timeout: 10)
     try ownership.registerApp(application)
-    try ownership.waitForHelper(timeout: 10)
+    try ownership.assertNoChildProcesses()
     try telemetry.waitForLaunch(excluding: previousTelemetrySession, timeout: 10)
-    try telemetry.waitForCount("ready", count: 1, timeout: 12, component: "relay")
     try assertCamBarIsNotFrontmost("after background launch")
 
     let driver = StatusItemDriver(processIdentifier: application.processIdentifier)
     let statusFrame = try driver.waitForFrame(timeout: 10)
-    let totalOpenCycles = 1 + options.reopenCycles
+    try driver.click(frame: statusFrame)
+    _ = try telemetry.waitForEvent(
+        "status_click",
+        timeout: 2,
+        component: "app",
+        surface: "menu"
+    )
+    guard let coldClick = try telemetry.matchingEvents(
+        "status_click",
+        component: "app",
+        surface: "menu"
+    ).last,
+          let coldOpenID = coldClick.openID else {
+        throw SmokeError.message("immediate cold click did not create an open intent")
+    }
 
-    if options.firstOpenIdleSeconds > 0 {
-        RunLoop.current.run(until: Date().addingTimeInterval(options.firstOpenIdleSeconds))
+    let streamSession = try telemetry.waitForEvent(
+        "session_started",
+        timeout: 12,
+        component: "stream"
+    )
+    guard let streamGeneration = streamSession.videoSessionID else {
+        throw SmokeError.message("stream session_started event has no video_session_id")
     }
-    let hiddenSessions = try telemetry.count("session_started", surface: "menu")
-    guard hiddenSessions == 0 else {
-        throw SmokeError.message(
-            "menu created \(hiddenSessions) hidden video session(s) before the first open"
-        )
+    let connected = try telemetry.waitForEvent("connected", timeout: 12, component: "rtsp")
+    guard connected.videoSessionID == streamGeneration else {
+        throw SmokeError.message("RTSP connection used a different stream generation")
     }
+    let decoderStarted = try telemetry.waitForEvent("started", timeout: 12, component: "decoder")
+    guard decoderStarted.videoSessionID == streamGeneration,
+          decoderStarted.detail?.contains("hardware=true") == true else {
+        throw SmokeError.message("decoder did not start in hardware for the active stream generation")
+    }
+    let firstFrame = try telemetry.waitForEvent(
+        "first_frame",
+        timeout: 12,
+        component: "video"
+    )
+    guard firstFrame.videoSessionID == streamGeneration else {
+        throw SmokeError.message("first_frame used a different stream generation")
+    }
+    let coldLiveView = try requireOpenEvent(
+        "live_view",
+        openID: coldOpenID,
+        videoSessionID: streamGeneration,
+        after: coldClick,
+        telemetry: telemetry,
+        timeout: 6
+    )
+    let coldElapsed = coldLiveView.uptimeMilliseconds - coldClick.uptimeMilliseconds
+    guard coldElapsed <= 5_500 else {
+        throw SmokeError.message("cold click-to-visible took \(coldElapsed) ms; hard limit is 5500 ms")
+    }
+    print("COLD_OPEN_LATENCY click_to_visible_ms=\(coldElapsed)")
+    try capturePopoverScreenshot(
+        processIdentifier: application.processIdentifier,
+        path: screenshotPath(for: 1, basePath: options.screenshotPath) + ".cold.png"
+    )
+    try driver.click(frame: statusFrame)
+    _ = try telemetry.waitForEvent(
+        "menu_closed",
+        timeout: 3,
+        component: "app",
+        surface: "menu",
+        openID: coldOpenID,
+        afterUptimeMilliseconds: coldLiveView.uptimeMilliseconds
+    )
+    let firstHeartbeat = try telemetry.waitForEvent(
+        "frame_heartbeat",
+        timeout: 12,
+        component: "video",
+        afterUptimeMilliseconds: firstFrame.uptimeMilliseconds
+    )
+    guard streamSession.uptimeMilliseconds <= connected.uptimeMilliseconds,
+          connected.uptimeMilliseconds <= decoderStarted.uptimeMilliseconds,
+          decoderStarted.uptimeMilliseconds <= firstFrame.uptimeMilliseconds,
+          firstFrame.uptimeMilliseconds <= firstHeartbeat.uptimeMilliseconds else {
+        throw SmokeError.message("native stream health telemetry arrived out of order")
+    }
+    try assertAdvancingHeartbeat(firstHeartbeat, generation: streamGeneration)
+    try telemetry.assertNoFailures()
+
+    let totalOpenCycles = 1 + options.reopenCycles
+    var warmOpenLatencies: [Int] = []
+
+    let heartbeatCountBeforeIdle = try telemetry.count("frame_heartbeat", component: "video")
+    let idleBaseline = try ownership.resourceSnapshot()
+    print(idleBaseline.summary(prefix: "IDLE_BASELINE"))
+    RunLoop.current.run(until: Date().addingTimeInterval(options.firstOpenIdleSeconds))
+    let heartbeatsAfterIdle = try telemetry.matchingEvents(
+        "frame_heartbeat",
+        component: "video"
+    )
+    guard heartbeatsAfterIdle.count > heartbeatCountBeforeIdle else {
+        throw SmokeError.message("stream did not emit another frame_heartbeat during idle")
+    }
+    for heartbeat in heartbeatsAfterIdle.dropFirst(heartbeatCountBeforeIdle) {
+        try assertAdvancingHeartbeat(heartbeat, generation: streamGeneration)
+    }
+    let idleFinal = try ownership.resourceSnapshot()
+    print(idleFinal.summary(prefix: "IDLE_FINAL"))
+    guard idleFinal.residentBytes <= 256 * 1_048_576 else {
+        throw SmokeError.message("CamBar resident memory exceeded 256 MB while idle-warm")
+    }
+    guard idleFinal.threadCount <= 64 else {
+        throw SmokeError.message("CamBar exceeded 64 threads while idle-warm")
+    }
+    if let delta = idleFinal.delta(from: idleBaseline) {
+        print(delta)
+        let cpuPercent = Double(idleFinal.cpuNanoseconds - idleBaseline.cpuNanoseconds)
+            / 1_000_000_000 / options.firstOpenIdleSeconds * 100
+        print(String(format: "IDLE_CPU_PERCENT whole_cambar=%.2f", cpuPercent))
+        guard cpuPercent <= 35 else {
+            throw SmokeError.message(String(format: "CamBar idle-warm CPU was %.2f%%; limit is 35%%", cpuPercent))
+        }
+        let residentGrowth = Int64(idleFinal.residentBytes) - Int64(idleBaseline.residentBytes)
+        guard residentGrowth <= 32 * 1_048_576 else {
+            throw SmokeError.message("CamBar resident memory grew by more than 32 MB while idle-warm")
+        }
+    }
+    try ownership.assertNoChildProcesses()
+    try telemetry.assertNoFailures()
     try assertCamBarIsNotFrontmost("after first-open idle")
+
+    let popoutStatusClickCount = try telemetry.count("status_click", surface: "menu")
+    try driver.click(frame: statusFrame)
+    try telemetry.waitForCount(
+        "status_click",
+        count: popoutStatusClickCount + 1,
+        timeout: 2,
+        component: "app",
+        surface: "menu"
+    )
+    guard let popoutMenuClick = try telemetry.matchingEvents(
+        "status_click",
+        component: "app",
+        surface: "menu"
+    ).last else {
+        throw SmokeError.message("popout setup click was not recorded")
+    }
+    let popoutMenuOpen = try requireWarmOpen(
+        after: popoutMenuClick,
+        videoSessionID: streamGeneration,
+        telemetry: telemetry
+    )
+    warmOpenLatencies.append(popoutMenuOpen.elapsedMilliseconds)
+    let expandFrame = try driver.waitForFrame(
+        identifier: "com.cambar.open-window",
+        timeout: 2
+    )
+    try driver.click(frame: expandFrame)
+    let windowRequested = try telemetry.waitForEvent(
+        "window_open_requested",
+        timeout: 2,
+        component: "app",
+        surface: "window",
+        afterUptimeMilliseconds: popoutMenuClick.uptimeMilliseconds
+    )
+    _ = try telemetry.waitForEvent(
+        "live_view",
+        timeout: 3,
+        component: "video",
+        surface: "window",
+        afterUptimeMilliseconds: windowRequested.uptimeMilliseconds
+    )
+    try capturePopoverScreenshot(
+        processIdentifier: application.processIdentifier,
+        path: options.screenshotPath + ".window.png"
+    )
+    try driver.closeFirstWindow()
+    _ = try telemetry.waitForEvent(
+        "window_closed",
+        timeout: 2,
+        component: "app",
+        surface: "window",
+        afterUptimeMilliseconds: windowRequested.uptimeMilliseconds
+    )
+    try telemetry.assertNoFailures()
+    print("PASS: native popout displayed non-black video and closed")
 
     for cycle in 1...totalOpenCycles {
         let phase = cycle == 1 ? "idle first open" : "reopen \(cycle - 1)/\(options.reopenCycles)"
         let statusClicksBeforeOpen = try telemetry.count("status_click", surface: "menu")
-        try driver.click(frame: statusFrame, inputMode: options.inputMode)
+        try driver.click(frame: statusFrame)
         try telemetry.waitForCount(
             "status_click",
             count: statusClicksBeforeOpen + 1,
@@ -630,17 +1075,27 @@ private func run() throws {
             component: "app",
             surface: "menu"
         )
-        try telemetry.waitForCount("menu_open_requested", count: cycle, timeout: 3, surface: "menu")
-        try telemetry.waitForCount("live_view", count: cycle, timeout: 12, surface: "menu")
-        try telemetry.waitForCount("frame_sample", count: cycle, timeout: 2, surface: "menu")
+        guard let statusClick = try telemetry.matchingEvents(
+            "status_click",
+            component: "app",
+            surface: "menu"
+        ).last else { throw SmokeError.message("opening status_click was not recorded") }
+        let warmOpen = try requireWarmOpen(
+            after: statusClick,
+            videoSessionID: streamGeneration,
+            telemetry: telemetry
+        )
+        let openID = warmOpen.openID
+        warmOpenLatencies.append(warmOpen.elapsedMilliseconds)
         try telemetry.assertNoFailures()
         try assertCamBarIsNotFrontmost("after \(phase) open")
-        if cycle == 1 {
-            try capturePopoverScreenshot(processIdentifier: application.processIdentifier, path: options.screenshotPath)
-        }
+        try capturePopoverScreenshot(
+            processIdentifier: application.processIdentifier,
+            path: screenshotPath(for: cycle, basePath: options.screenshotPath)
+        )
 
         let statusClicksBeforeClose = try telemetry.count("status_click", surface: "menu")
-        try driver.click(frame: statusFrame, inputMode: options.inputMode)
+        try driver.click(frame: statusFrame)
         try telemetry.waitForCount(
             "status_click",
             count: statusClicksBeforeClose + 1,
@@ -648,18 +1103,202 @@ private func run() throws {
             component: "app",
             surface: "menu"
         )
-        try telemetry.waitForCount("menu_closed", count: cycle, timeout: 3, surface: "menu")
-        try telemetry.waitForCount("session_stopped", count: cycle, timeout: 3, surface: "menu")
+        guard let closeClick = try telemetry.matchingEvents(
+            "status_click",
+            component: "app",
+            surface: "menu"
+        ).last,
+              closeClick.openID == openID else {
+            throw SmokeError.message("closing status_click did not retain open_id \(openID)")
+        }
+        _ = try telemetry.waitForEvent(
+            "menu_closed",
+            timeout: 3,
+            component: "app",
+            surface: "menu",
+            openID: openID,
+            afterUptimeMilliseconds: closeClick.uptimeMilliseconds
+        )
         try telemetry.assertNoFailures()
-        try ownership.refreshHelpers()
+        try ownership.assertNoChildProcesses()
         try assertCamBarIsNotFrontmost("after \(phase) close")
         print("PASS: \(phase) open/live-frame/close")
     }
 
-    try assertExactCounts(telemetry: telemetry, opens: totalOpenCycles, closes: totalOpenCycles)
+    let openingBurstClickCount = try telemetry.count("status_click", component: "app", surface: "menu")
+    try driver.clickBurst(frame: statusFrame)
+    try telemetry.waitForCount(
+        "status_click",
+        count: openingBurstClickCount + 2,
+        timeout: 2,
+        component: "app",
+        surface: "menu"
+    )
+    let openingBurstClicks = Array(try telemetry.matchingEvents(
+        "status_click",
+        component: "app",
+        surface: "menu"
+    ).suffix(2))
+    guard openingBurstClicks.count == 2,
+          let openingBurstID = openingBurstClicks[0].openID,
+          openingBurstClicks[1].openID == openingBurstID,
+          openingBurstClicks[0].detail?.contains("command=show") == true,
+          openingBurstClicks[0].detail?.contains("state=opening") == true,
+          openingBurstClicks[1].detail?.contains("command=none") == true,
+          openingBurstClicks[1].detail?.contains("desired=false") == true,
+          openingBurstClicks[1].detail?.contains("state=opening") == true else {
+        throw SmokeError.message("physical open-close burst did not land while the popover was opening")
+    }
+    _ = try telemetry.waitForEvent(
+        "menu_closed",
+        timeout: 3,
+        component: "app",
+        surface: "menu",
+        openID: openingBurstID,
+        afterUptimeMilliseconds: openingBurstClicks[1].uptimeMilliseconds
+    )
+    guard try telemetry.matchingEvents(
+        "playback_open_started",
+        component: "video",
+        surface: "menu",
+        openID: openingBurstID
+    ).isEmpty else {
+        throw SmokeError.message("open-close-during-opening burst incorrectly started playback")
+    }
+    try telemetry.assertNoFailures()
+    try assertCamBarIsNotFrontmost("after open-close-during-opening burst")
+
+    let raceOpenClickCount = try telemetry.count("status_click", component: "app", surface: "menu")
+    try driver.click(frame: statusFrame)
+    try telemetry.waitForCount(
+        "status_click",
+        count: raceOpenClickCount + 1,
+        timeout: 2,
+        component: "app",
+        surface: "menu"
+    )
+    guard let raceOpenClick = try telemetry.matchingEvents(
+        "status_click",
+        component: "app",
+        surface: "menu"
+    ).last else { throw SmokeError.message("race setup open click was not recorded") }
+    let raceWarmOpen = try requireWarmOpen(
+        after: raceOpenClick,
+        videoSessionID: streamGeneration,
+        telemetry: telemetry
+    )
+    let raceOpenID = raceWarmOpen.openID
+    warmOpenLatencies.append(raceWarmOpen.elapsedMilliseconds)
+
+    let closingBurstClickCount = try telemetry.count("status_click", component: "app", surface: "menu")
+    try driver.clickBurst(frame: statusFrame)
+    try telemetry.waitForCount(
+        "status_click",
+        count: closingBurstClickCount + 2,
+        timeout: 2,
+        component: "app",
+        surface: "menu"
+    )
+    let closingBurstClicks = Array(try telemetry.matchingEvents(
+        "status_click",
+        component: "app",
+        surface: "menu"
+    ).suffix(2))
+    guard closingBurstClicks.count == 2,
+          closingBurstClicks[0].openID == raceOpenID,
+          closingBurstClicks[0].detail?.contains("command=close") == true,
+          closingBurstClicks[0].detail?.contains("state=closing") == true,
+          let reopenedID = closingBurstClicks[1].openID,
+          reopenedID != raceOpenID,
+          closingBurstClicks[1].detail?.contains("command=none") == true,
+          closingBurstClicks[1].detail?.contains("desired=true") == true,
+          closingBurstClicks[1].detail?.contains("state=closing") == true else {
+        throw SmokeError.message("physical close-reopen burst did not land while the popover was closing")
+    }
+    _ = try telemetry.waitForEvent(
+        "menu_closed",
+        timeout: 3,
+        component: "app",
+        surface: "menu",
+        openID: raceOpenID,
+        afterUptimeMilliseconds: closingBurstClicks[0].uptimeMilliseconds
+    )
+    let convergedReopen = try requireWarmOpen(
+        after: closingBurstClicks[1],
+        videoSessionID: streamGeneration,
+        telemetry: telemetry
+    )
+    let convergedReopenID = convergedReopen.openID
+    warmOpenLatencies.append(convergedReopen.elapsedMilliseconds)
+    guard convergedReopenID == reopenedID else {
+        throw SmokeError.message("close-reopen burst converged to the wrong open_id")
+    }
+    try capturePopoverScreenshot(
+        processIdentifier: application.processIdentifier,
+        path: screenshotPath(for: totalOpenCycles + 1, basePath: options.screenshotPath)
+    )
+    let finalCloseClickCount = try telemetry.count("status_click", component: "app", surface: "menu")
+    try driver.click(frame: statusFrame)
+    try telemetry.waitForCount(
+        "status_click",
+        count: finalCloseClickCount + 1,
+        timeout: 2,
+        component: "app",
+        surface: "menu"
+    )
+    guard let finalCloseClick = try telemetry.matchingEvents(
+        "status_click",
+        component: "app",
+        surface: "menu"
+    ).last, finalCloseClick.openID == reopenedID else {
+        throw SmokeError.message("final burst cleanup close lost the reopened open_id")
+    }
+    _ = try telemetry.waitForEvent(
+        "menu_closed",
+        timeout: 3,
+        component: "app",
+        surface: "menu",
+        openID: reopenedID,
+        afterUptimeMilliseconds: finalCloseClick.uptimeMilliseconds
+    )
+    try telemetry.assertNoFailures()
+    try assertCamBarIsNotFrontmost("after physical lifecycle bursts")
+
+    try assertExactCounts(
+        telemetry: telemetry,
+        statusClicks: totalOpenCycles * 2 + 9,
+        presentationRequests: totalOpenCycles + 5,
+        playbackOpens: totalOpenCycles + 4,
+        closes: totalOpenCycles + 5
+    )
+    let observedGenerations = Set(try telemetry.events().compactMap(\.videoSessionID))
+    guard observedGenerations == Set([streamGeneration]) else {
+        throw SmokeError.message(
+            "expected only stream generation \(streamGeneration), found \(observedGenerations.sorted())"
+        )
+    }
+    let decoderStarts = try telemetry.matchingEvents("started", component: "decoder")
+    guard !decoderStarts.isEmpty,
+          decoderStarts.allSatisfy({ $0.detail?.contains("hardware=true") == true }) else {
+        throw SmokeError.message("not every decoder generation used hardware decoding")
+    }
+    let p50 = percentile(warmOpenLatencies, 0.50)
+    let p95 = percentile(warmOpenLatencies, 0.95)
+    let enforceP95Target = warmOpenLatencies.count >= 20
+    print(
+        "WARM_OPEN_LATENCY samples=\(warmOpenLatencies.count) p50_ms=\(p50) p95_ms=\(p95) "
+            + "limit_ms=500 p95_target_ms=100 enforced=\(enforceP95Target)"
+    )
+    if enforceP95Target, p95 > 100 {
+        throw SmokeError.message("warm-open p95 was \(p95) ms; expected at most 100 ms with 20+ samples")
+    }
+    try ownership.assertNoChildProcesses()
     try assertCamBarIsNotFrontmost("at completion")
-    let inputDescription = options.inputMode == .physical ? "physical clicks" : "accessibility presses"
-    print("PASS: \(totalOpenCycles) open/close cycles via \(inputDescription), exact intents, no recovery or black-frame telemetry")
+    print(
+        "PASS: \(totalOpenCycles) warm open/close cycles plus physical lifecycle bursts, <=500 ms live view, "
+            + "one hardware-decoded native stream, advancing heartbeats, no pipeline failures, child processes, "
+            + "or focus activation; screenshots retained as visual artifacts"
+    )
 }
 
 do {
