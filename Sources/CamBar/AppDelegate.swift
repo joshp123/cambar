@@ -28,6 +28,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
             self?.relayStateDidChange(state)
         }
         relayController.start()
+        scheduleDebugPopoverHooks()
 
         wakeObserver = NSWorkspace.shared.notificationCenter.addObserver(
             forName: NSWorkspace.didWakeNotification,
@@ -90,9 +91,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         case .starting, .warming:
             uiState.status = .connecting
         }
-        playbackController.setRelayReady(state == .ready)
+        let relayAvailable = switch state {
+        case .warming, .ready: true
+        case .starting, .waitingToRetry, .stopped: false
+        }
+        playbackController.setRelayState(available: relayAvailable, ready: state == .ready)
         guard state == .ready else { return }
-        runDebugHooksOnce()
+        runReadyDebugHooksOnce()
     }
 
     private func retry() {
@@ -174,22 +179,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         }
     }
 
-    private func runDebugHooksOnce() {
+    private func runReadyDebugHooksOnce() {
         guard !didRunDebugHooks else { return }
         didRunDebugHooks = true
         if ProcessInfo.processInfo.environment["CAMBAR_OPEN_WINDOW"] == "1" {
             DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in self?.openWindow() }
         }
+    }
+
+    private func scheduleDebugPopoverHooks() {
         let delay = TimeInterval(ProcessInfo.processInfo.environment["CAMBAR_DEBUG_POPOVER_START_DELAY_SECONDS"] ?? "1") ?? 1
-        if ProcessInfo.processInfo.environment["CAMBAR_OPEN_POPOVER"] == "1" {
-            DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in self?.showPopoverFromStatusItem() }
-        }
         if let value = ProcessInfo.processInfo.environment["CAMBAR_DEBUG_POPOVER_CYCLES"],
            let cycles = Int(value), cycles > 0 {
             popover.behavior = .applicationDefined
             debugPopoverRemaining = cycles
             debugPopoverVisibleSeconds = TimeInterval(ProcessInfo.processInfo.environment["CAMBAR_DEBUG_POPOVER_VISIBLE_SECONDS"] ?? "2") ?? 2
             DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in self?.runNextDebugPopoverCycle() }
+        } else if ProcessInfo.processInfo.environment["CAMBAR_OPEN_POPOVER"] == "1" {
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in self?.showPopoverFromStatusItem() }
         }
     }
 

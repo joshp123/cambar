@@ -1,6 +1,7 @@
 import CamBarCore
 import Darwin
 import Foundation
+import Network
 
 @MainActor
 final class Go2RTCRelayController {
@@ -12,6 +13,7 @@ final class Go2RTCRelayController {
         case configWriteFailed
         case processLaunchFailed(String)
         case processExited(Int32)
+        case cameraRouteUnavailable
         case cameraUnavailable
 
         var description: String {
@@ -21,6 +23,7 @@ final class Go2RTCRelayController {
             case .configWriteFailed: "relay config write failed"
             case let .processLaunchFailed(message): "go2rtc launch failed: \(message)"
             case let .processExited(status): "go2rtc exited with status \(status)"
+            case .cameraRouteUnavailable: "camera route unavailable"
             case .cameraUnavailable: "camera unavailable"
             }
         }
@@ -101,6 +104,11 @@ final class Go2RTCRelayController {
                 try? await Task.sleep(for: .milliseconds(150))
             }
 
+            guard await waitForCameraRoute() else {
+                await scheduleRetry(after: .cameraRouteUnavailable, failureCount: &failureCount)
+                continue
+            }
+
             switch startProcess() {
             case .success:
                 state = .warming(attempt: attempt)
@@ -176,6 +184,56 @@ final class Go2RTCRelayController {
         StreamSourceResolver.loadRtspOverride()
             ?? StreamSourceResolver.loadCameraConfig(from: StreamSourceResolver.defaultConfigURL())
                 .flatMap(StreamSourceResolver.buildRtspURL)
+    }
+
+    private func waitForCameraRoute(timeout: Duration = .seconds(2)) async -> Bool {
+        guard let sourceURL = sourceURL(),
+              let components = URLComponents(string: sourceURL),
+              let host = components.host,
+              let port = UInt16(exactly: components.port ?? 554) else {
+            return false
+        }
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: timeout)
+        repeat {
+            if await Self.canConnect(host: host, port: port, timeout: .milliseconds(300)) {
+                return true
+            }
+            try? await Task.sleep(for: .milliseconds(100))
+        } while !Task.isCancelled && clock.now < deadline
+        return false
+    }
+
+    private nonisolated static func canConnect(host: String, port: UInt16, timeout: Duration) async -> Bool {
+        guard let endpointPort = NWEndpoint.Port(rawValue: port) else { return false }
+        let connection = NWConnection(host: NWEndpoint.Host(host), port: endpointPort, using: .tcp)
+        return await withTaskGroup(of: Bool.self) { group in
+            group.addTask {
+                await withCheckedContinuation { continuation in
+                    connection.stateUpdateHandler = { state in
+                        switch state {
+                        case .ready:
+                            connection.stateUpdateHandler = nil
+                            continuation.resume(returning: true)
+                        case .failed, .cancelled:
+                            connection.stateUpdateHandler = nil
+                            continuation.resume(returning: false)
+                        default:
+                            break
+                        }
+                    }
+                    connection.start(queue: DispatchQueue.global(qos: .userInitiated))
+                }
+            }
+            group.addTask {
+                try? await Task.sleep(for: timeout)
+                return false
+            }
+            let result = await group.next() ?? false
+            connection.cancel()
+            group.cancelAll()
+            return result
+        }
     }
 
     private func writeConfig() -> Result<URL, Failure> {

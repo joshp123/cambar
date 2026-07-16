@@ -9,6 +9,7 @@ final class CameraPlaybackController: NSObject, WKNavigationDelegate, WKScriptMe
         case window
     }
 
+    private var relayAvailable = false
     private var relayReady = false
     private var session: VideoSession?
     private var activeSurface: Surface?
@@ -23,16 +24,21 @@ final class CameraPlaybackController: NSObject, WKNavigationDelegate, WKScriptMe
     private lazy var parkingWindow = makeParkingWindow()
     private let diagnosticsEnabled = ProcessInfo.processInfo.environment["CAMBAR_DIAGNOSTICS"] == "1"
 
-    func setRelayReady(_ ready: Bool) {
+    func setRelayState(available: Bool, ready: Bool) {
+        relayAvailable = available
         relayReady = ready
-        if ready {
-            if let activeSurface {
-                show(activeSurface)
-            } else {
-                warm()
-            }
-        } else {
+        guard available else {
             tearDownSession(reason: "relay_unavailable")
+            return
+        }
+        if session == nil {
+            startSession()
+        }
+        guard ready else { return }
+        if let activeSurface {
+            resumeOpen(on: activeSurface)
+        } else {
+            warm()
         }
     }
 
@@ -69,6 +75,10 @@ final class CameraPlaybackController: NSObject, WKNavigationDelegate, WKScriptMe
         openStartedAt = ProcessInfo.processInfo.systemUptime
 
         guard relayReady else { return }
+        resumeOpen(on: surface)
+    }
+
+    private func resumeOpen(on surface: Surface) {
         if session == nil {
             startSession()
         }
@@ -76,8 +86,10 @@ final class CameraPlaybackController: NSObject, WKNavigationDelegate, WKScriptMe
         if let container = containers[surface]?.view {
             attach(session.webView, to: container)
         }
-        requestFreshOpenFrame(token: token)
-        startOpenWatchdog(token: token)
+        if let openToken {
+            requestFreshOpenFrame(token: openToken)
+            startOpenWatchdog(token: openToken)
+        }
     }
 
     func hide(_ surface: Surface) {
@@ -96,6 +108,7 @@ final class CameraPlaybackController: NSObject, WKNavigationDelegate, WKScriptMe
     }
 
     func shutdown() {
+        relayAvailable = false
         relayReady = false
         activeSurface = nil
         restartTask?.cancel()
@@ -176,7 +189,7 @@ final class CameraPlaybackController: NSObject, WKNavigationDelegate, WKScriptMe
     }
 
     private func startSession() {
-        guard relayReady, session == nil else { return }
+        guard relayAvailable, session == nil else { return }
         restartTask?.cancel()
         restartTask = nil
         let generation = UUID().uuidString
@@ -252,7 +265,7 @@ final class CameraPlaybackController: NSObject, WKNavigationDelegate, WKScriptMe
     }
 
     private func recover(reason: String) {
-        guard relayReady else { return }
+        guard relayAvailable else { return }
         DirectStreamTelemetry.record(component: "video", event: "recover", detail: "reason=\(reason)")
         tearDownSession(reason: reason)
         restartCount += 1
@@ -261,7 +274,7 @@ final class CameraPlaybackController: NSObject, WKNavigationDelegate, WKScriptMe
         restartTask?.cancel()
         restartTask = Task { [weak self] in
             try? await Task.sleep(for: .seconds(delay))
-            guard !Task.isCancelled, let self, self.relayReady else { return }
+            guard !Task.isCancelled, let self, self.relayAvailable else { return }
             self.startSession()
             if let token = self.openToken {
                 self.startOpenWatchdog(token: token)

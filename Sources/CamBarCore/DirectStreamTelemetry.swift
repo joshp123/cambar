@@ -32,6 +32,7 @@ public enum DirectStreamTelemetry {
         queue.async {
             var fields: [String: Any] = [
                 "time": ISO8601DateFormatter().string(from: Date()),
+                "uptime_ms": Int(ProcessInfo.processInfo.systemUptime * 1_000),
                 "component": component,
                 "event": event
             ]
