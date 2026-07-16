@@ -1,10 +1,10 @@
-// swift-tools-version: 6.2
+// swift-tools-version: 6.4
 import PackageDescription
 
 let package = Package(
     name: "CamBar",
     platforms: [
-        .macOS(.v14),
+        .macOS(.v27),
     ],
     targets: [
         .target(

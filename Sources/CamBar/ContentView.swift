@@ -20,7 +20,6 @@ final class CamBarUIState {
 
 struct ContentView: View {
     static let contentInset: CGFloat = 6
-    static let videoCornerRadius: CGFloat = 4
 
     var state: CamBarUIState
     let playback: CameraPlaybackController
@@ -34,7 +33,7 @@ struct ContentView: View {
             CameraVideoView(
                 playback: playback,
                 surface: .menu,
-                cornerRadius: Self.videoCornerRadius
+                cornerStyle: .containerConcentric
             )
                 .frame(width: state.videoSize.width, height: state.videoSize.height)
                 .padding(Self.contentInset)

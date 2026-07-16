@@ -19,7 +19,7 @@ final class CameraPlaybackController: NSObject, WKNavigationDelegate, WKScriptMe
     private var startupWatchdog: Task<Void, Never>?
     private var openWatchdog: Task<Void, Never>?
     private var restartTask: Task<Void, Never>?
-    private let parkingView = CameraVideoContainerView(cornerRadius: 0)
+    private let parkingView = CameraVideoContainerView(cornerStyle: .square)
     private lazy var parkingWindow = makeParkingWindow()
     private let diagnosticsEnabled = ProcessInfo.processInfo.environment["CAMBAR_DIAGNOSTICS"] == "1"
 
@@ -185,6 +185,7 @@ final class CameraPlaybackController: NSObject, WKNavigationDelegate, WKScriptMe
         configuration.mediaTypesRequiringUserActionForPlayback = []
         configuration.userContentController.add(self, name: "cambarVideoEvent")
 
+        _ = parkingWindow
         let webView = CameraWebView(frame: parkingView.bounds, configuration: configuration)
         webView.setValue(false, forKey: "drawsBackground")
         webView.navigationDelegate = self
@@ -286,7 +287,7 @@ final class CameraPlaybackController: NSObject, WKNavigationDelegate, WKScriptMe
 
     private func makeParkingWindow() -> NSWindow {
         let window = NSWindow(
-            contentRect: NSRect(x: -20_000, y: -20_000, width: 320, height: 180),
+            contentRect: NSRect(x: -20_000, y: -20_000, width: 336, height: 190),
             styleMask: [.borderless],
             backing: .buffered,
             defer: false
@@ -374,14 +375,13 @@ private final class CameraWebView: WKWebView {
 @MainActor
 final class CameraVideoContainerView: NSView {
     private let cover = NSView()
-    private var fallbackCornerRadius: CGFloat
+    private var cornerStyle: CameraVideoCornerStyle
 
-    init(cornerRadius: CGFloat) {
-        fallbackCornerRadius = cornerRadius
+    init(cornerStyle: CameraVideoCornerStyle) {
+        self.cornerStyle = cornerStyle
         super.init(frame: .zero)
         wantsLayer = true
         layer?.backgroundColor = NSColor.black.cgColor
-        layer?.cornerRadius = cornerRadius
         layer?.cornerCurve = .continuous
         layer?.masksToBounds = true
         cover.wantsLayer = true
@@ -394,12 +394,15 @@ final class CameraVideoContainerView: NSView {
 
     override var isFlipped: Bool { true }
 
-    @available(macOS 27.0, *)
     override var cornerConfiguration: NSViewCornerConfiguration? {
-        .uniformCorners(radius: .containerConcentric)
+        switch cornerStyle {
+        case .square:
+            .uniformCorners(radius: .fixed(0))
+        case .containerConcentric:
+            .uniformCorners(radius: .containerConcentric)
+        }
     }
 
-    @available(macOS 27.0, *)
     override func viewDidChangeEffectiveCornerRadii() {
         super.viewDidChangeEffectiveCornerRadii()
         applyCornerRadius()
@@ -412,9 +415,10 @@ final class CameraVideoContainerView: NSView {
         cover.frame = bounds
     }
 
-    func setCornerRadius(_ radius: CGFloat) {
-        fallbackCornerRadius = radius
-        applyCornerRadius()
+    func setCornerStyle(_ style: CameraVideoCornerStyle) {
+        guard style != cornerStyle else { return }
+        cornerStyle = style
+        invalidateCornerConfiguration()
     }
 
     func attach(_ webView: WKWebView) {
@@ -429,11 +433,7 @@ final class CameraVideoContainerView: NSView {
     }
 
     private func applyCornerRadius() {
-        if #available(macOS 27.0, *), let radii = effectiveCornerRadii {
-            layer?.cornerRadius = radii.topLeft
-        } else {
-            layer?.cornerRadius = fallbackCornerRadius
-        }
+        layer?.cornerRadius = effectiveCornerRadii?.topLeft ?? 0
     }
 }
 

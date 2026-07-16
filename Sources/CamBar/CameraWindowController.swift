@@ -76,7 +76,7 @@ struct CameraWindowView: View {
     let playback: CameraPlaybackController
 
     var body: some View {
-        CameraVideoView(playback: playback, surface: .window, cornerRadius: 0)
+        CameraVideoView(playback: playback, surface: .window, cornerStyle: .square)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .background(Color.black)
     }
