@@ -513,6 +513,7 @@ private final class CameraPixelBufferView: NSView {
     private var cadenceSubmitted = 0
     private var cadencePendingReplacements = 0
     private var cadenceLateDrops = 0
+    private var cadenceFutureWaits = 0
     private var cadenceReanchors = 0
     private var cadenceFailures = 0
     private var cadenceJitterSamples = 0
@@ -707,7 +708,7 @@ private final class CameraPixelBufferView: NSView {
     }
 
     private func enqueue(_ frame: CameraFrame) async -> EnqueueResult {
-        let now = ProcessInfo.processInfo.systemUptime
+        var now = ProcessInfo.processInfo.systemUptime
         updateCadenceEstimate(frame: frame, arrivedAt: now)
 
         let presentationTime = frame.presentationTime.seconds
@@ -717,14 +718,29 @@ private final class CameraPixelBufferView: NSView {
         } else {
             targetDisplayTime = nil
         }
+        if let targetDisplayTime {
+            let admissionDelay = NativeFrameCadence.admissionDelay(
+                targetDisplayTime: targetDisplayTime,
+                now: now,
+                frameDuration: estimatedFrameDuration
+            )
+            if admissionDelay > 0,
+               admissionDelay <= NativeFrameCadence.discontinuityThreshold {
+                cadenceFutureWaits += 1
+                try? await Task.sleep(for: .seconds(admissionDelay))
+                guard !Task.isCancelled else {
+                    return EnqueueResult(accepted: false, presentationDelay: 0)
+                }
+                now = ProcessInfo.processInfo.systemUptime
+            }
+        }
         let generationChanged = currentGeneration != frame.generation
         let reanchor = generationChanged || NativeFrameCadence.requiresReanchor(
             presentationTime: presentationTime,
             previousPresentationTime: previousPresentationTime,
             targetDisplayTime: targetDisplayTime,
             now: now,
-            consecutiveLateFrames: consecutiveLateFrames,
-            frameDuration: estimatedFrameDuration
+            consecutiveLateFrames: consecutiveLateFrames
         )
         let late = targetDisplayTime.map {
             NativeFrameCadence.isLate(targetDisplayTime: $0, now: now)
@@ -900,7 +916,7 @@ private final class CameraPixelBufferView: NSView {
             event: "cadence_heartbeat",
             surface: surface,
             elapsedMilliseconds: Int(elapsed * 1_000),
-            detail: "received=\(cadenceReceived) submitted=\(cadenceSubmitted) pending_replacements=\(cadencePendingReplacements) late_drops=\(cadenceLateDrops) max_client_depth=2 reanchors=\(cadenceReanchors) failures=\(cadenceFailures) estimated_fps=\(String(format: "%.2f", 1 / estimatedFrameDuration)) lead_ms=\(String(format: "%.2f", NativeFrameCadence.presentationLead(frameDuration: estimatedFrameDuration) * 1_000)) jitter_avg_ms=\(String(format: "%.2f", averageJitter)) jitter_max_ms=\(String(format: "%.2f", cadenceJitterMaximumMilliseconds))"
+            detail: "received=\(cadenceReceived) submitted=\(cadenceSubmitted) pending_replacements=\(cadencePendingReplacements) late_drops=\(cadenceLateDrops) future_waits=\(cadenceFutureWaits) max_client_depth=2 reanchors=\(cadenceReanchors) failures=\(cadenceFailures) estimated_fps=\(String(format: "%.2f", 1 / estimatedFrameDuration)) lead_ms=\(String(format: "%.2f", NativeFrameCadence.presentationLead(frameDuration: estimatedFrameDuration) * 1_000)) jitter_avg_ms=\(String(format: "%.2f", averageJitter)) jitter_max_ms=\(String(format: "%.2f", cadenceJitterMaximumMilliseconds))"
         )
         recordPerformanceMetrics()
         cadenceWindowStartedAt = now
@@ -908,6 +924,7 @@ private final class CameraPixelBufferView: NSView {
         cadenceSubmitted = 0
         cadencePendingReplacements = 0
         cadenceLateDrops = 0
+        cadenceFutureWaits = 0
         cadenceReanchors = 0
         cadenceFailures = 0
         cadenceJitterSamples = 0
@@ -921,6 +938,7 @@ private final class CameraPixelBufferView: NSView {
         cadenceSubmitted = 0
         cadencePendingReplacements = 0
         cadenceLateDrops = 0
+        cadenceFutureWaits = 0
         cadenceReanchors = 0
         cadenceFailures = 0
         cadenceJitterSamples = 0

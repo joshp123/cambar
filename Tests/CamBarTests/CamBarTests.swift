@@ -368,13 +368,19 @@ final class CamBarTests: XCTestCase {
             now: 20,
             consecutiveLateFrames: 0
         ))
-        XCTAssertTrue(NativeFrameCadence.requiresReanchor(
+        XCTAssertFalse(NativeFrameCadence.requiresReanchor(
             presentationTime: 10.12,
             previousPresentationTime: 10,
             targetDisplayTime: 20.12,
             now: 20,
-            consecutiveLateFrames: 0,
-            frameDuration: 0.04
+            consecutiveLateFrames: 0
+        ))
+        XCTAssertTrue(NativeFrameCadence.requiresReanchor(
+            presentationTime: 10.16,
+            previousPresentationTime: 10.12,
+            targetDisplayTime: 20.6,
+            now: 20,
+            consecutiveLateFrames: 0
         ))
         XCTAssertTrue(NativeFrameCadence.requiresReanchor(
             presentationTime: 10.04,
@@ -384,6 +390,24 @@ final class CamBarTests: XCTestCase {
             consecutiveLateFrames: 2
         ))
         XCTAssertTrue(NativeFrameCadence.isLate(targetDisplayTime: 19.9, now: 20))
+        XCTAssertEqual(
+            NativeFrameCadence.admissionDelay(
+                targetDisplayTime: 20.2,
+                now: 20,
+                frameDuration: 0.04
+            ),
+            0.12,
+            accuracy: 0.000_001
+        )
+        XCTAssertEqual(
+            NativeFrameCadence.admissionDelay(
+                targetDisplayTime: 20.04,
+                now: 20,
+                frameDuration: 0.04
+            ),
+            0,
+            accuracy: 0.000_001
+        )
     }
 
     func testOpeningWaitsForAFrameDecodedAfterTheClick() {

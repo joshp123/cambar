@@ -45,14 +45,13 @@ public enum NativeFrameCadence {
         previousPresentationTime: TimeInterval?,
         targetDisplayTime: TimeInterval?,
         now: TimeInterval,
-        consecutiveLateFrames: Int,
-        frameDuration: TimeInterval = defaultFrameDuration
+        consecutiveLateFrames: Int
     ) -> Bool {
         guard let previousPresentationTime,
               let targetDisplayTime else { return true }
         return presentationTime <= previousPresentationTime
             || presentationTime - previousPresentationTime > discontinuityThreshold
-            || targetDisplayTime > now + 2 * frameDuration
+            || targetDisplayTime > now + discontinuityThreshold
             || (isLate(targetDisplayTime: targetDisplayTime, now: now)
                 && consecutiveLateFrames >= 2)
     }
@@ -62,6 +61,14 @@ public enum NativeFrameCadence {
         now: TimeInterval
     ) -> Bool {
         targetDisplayTime < now - minimumFrameDuration
+    }
+
+    public static func admissionDelay(
+        targetDisplayTime: TimeInterval,
+        now: TimeInterval,
+        frameDuration: TimeInterval
+    ) -> TimeInterval {
+        max(0, targetDisplayTime - now - 2 * frameDuration)
     }
 }
 
