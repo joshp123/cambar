@@ -563,26 +563,31 @@ private final class CameraPixelBufferView: NSView {
                       attemptID == currentSurfaceAttemptID else { return false }
                 guard enqueue(frame) else { return false }
             }
+            var acceptedImage = false
             for _ in 0..<100 {
                 guard !Task.isCancelled,
                       attemptID == currentSurfaceAttemptID else { return false }
                 if displayLayer.isReadyForDisplay {
-                    // isReadyForDisplay means the layer accepted an image, not
-                    // that WindowServer has composited it. Keep the cover for
-                    // one display interval so reveal cannot expose a black
-                    // first frame.
-                    try? await Task.sleep(for: .milliseconds(20))
-                    guard !Task.isCancelled,
-                          attemptID == currentSurfaceAttemptID,
-                          displayLayer.isReadyForDisplay else { return false }
-                    expectsNotReady = false
-                    return true
+                    acceptedImage = true
+                    break
                 }
                 try? await Task.sleep(for: .milliseconds(1))
             }
-            let ready = displayLayer.isReadyForDisplay
-            expectsNotReady = !ready
-            return ready
+            acceptedImage = acceptedImage || displayLayer.isReadyForDisplay
+            guard acceptedImage else {
+                expectsNotReady = true
+                return false
+            }
+
+            // isReadyForDisplay means the layer accepted an image, not that
+            // WindowServer has composited it. Keep the cover for one display
+            // interval so every success path waits for the first paint.
+            try? await Task.sleep(for: .milliseconds(20))
+            guard !Task.isCancelled,
+                  attemptID == currentSurfaceAttemptID,
+                  displayLayer.isReadyForDisplay else { return false }
+            expectsNotReady = false
+            return true
         }
     }
 
