@@ -301,6 +301,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         )
         let presentationID = popoverPresentation.presentationID
         startMonitoringOutsideClicks()
+        attemptPopoverShow(
+            button: button,
+            presentationID: presentationID,
+            retriesRemaining: 1
+        )
+    }
+
+    private func attemptPopoverShow(
+        button: NSStatusBarButton,
+        presentationID: UInt64,
+        retriesRemaining: Int
+    ) {
         popover.show(relativeTo: button.bounds, of: button, preferredEdge: .maxY)
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { [weak self] in
             guard let self,
@@ -314,6 +326,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
                     openID: self.pendingOpenIntent?.id ?? self.activeOpenIntent?.id
                 )
                 self.confirmPopoverShown()
+            } else if retriesRemaining > 0,
+                      self.popoverPresentation.wantsVisible {
+                DirectStreamTelemetry.record(
+                    component: "app",
+                    event: "menu_show_retry",
+                    surface: "menu",
+                    openID: self.pendingOpenIntent?.id
+                )
+                self.attemptPopoverShow(
+                    button: button,
+                    presentationID: presentationID,
+                    retriesRemaining: retriesRemaining - 1
+                )
             } else {
                 DirectStreamTelemetry.record(
                     component: "app",
