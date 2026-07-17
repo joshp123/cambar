@@ -408,15 +408,21 @@ private actor CameraStreamWorker {
         resetEncodedCadenceWindow()
         firstFrameEmitted = false
 
+        let transport = rtspTransport
+        let transportName = switch transport {
+        case .tcp: "tcp"
+        case .udp: "udp"
+        }
         DirectStreamTelemetry.record(
             component: "stream",
             event: "session_started",
-            videoSessionID: generation
+            videoSessionID: generation,
+            detail: "transport=\(transportName)"
         )
         let session = RTSPClientSession(
             url: source.url,
             credentials: source.credentials,
-            transport: .tcp,
+            transport: transport,
             userAgent: "CamBar",
             onDiagnostic: { diagnostic in
                 DirectStreamTelemetry.record(
@@ -502,6 +508,12 @@ private actor CameraStreamWorker {
                 awaitingKeyframe = true
             }
         }
+    }
+
+    private var rtspTransport: Transport {
+        ProcessInfo.processInfo.environment["CAMBAR_RTSP_TRANSPORT"]?.lowercased() == "udp"
+            ? .udp
+            : .tcp
     }
 
     private func createDecoder(generation: String, sps: Data, pps: Data) throws {
