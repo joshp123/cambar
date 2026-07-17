@@ -336,34 +336,54 @@ final class CamBarTests: XCTestCase {
         XCTAssertTrue(NativeFrameCadence.requiresReanchor(
             presentationTime: 10,
             previousPresentationTime: nil,
-            currentMediaTime: nil
+            targetDisplayTime: nil,
+            now: 20,
+            consecutiveLateFrames: 0
         ))
         XCTAssertFalse(NativeFrameCadence.requiresReanchor(
             presentationTime: 10.04,
             previousPresentationTime: 10,
-            currentMediaTime: 10
+            targetDisplayTime: 20.04,
+            now: 20,
+            consecutiveLateFrames: 0
         ))
         XCTAssertTrue(NativeFrameCadence.requiresReanchor(
             presentationTime: 10,
             previousPresentationTime: 10,
-            currentMediaTime: 10
+            targetDisplayTime: 20.04,
+            now: 20,
+            consecutiveLateFrames: 0
         ))
         XCTAssertTrue(NativeFrameCadence.requiresReanchor(
             presentationTime: 11,
             previousPresentationTime: 10,
-            currentMediaTime: 10.04
+            targetDisplayTime: 21,
+            now: 20,
+            consecutiveLateFrames: 0
+        ))
+        XCTAssertFalse(NativeFrameCadence.requiresReanchor(
+            presentationTime: 10.04,
+            previousPresentationTime: 10,
+            targetDisplayTime: 19.9,
+            now: 20,
+            consecutiveLateFrames: 0
+        ))
+        XCTAssertTrue(NativeFrameCadence.requiresReanchor(
+            presentationTime: 10.12,
+            previousPresentationTime: 10,
+            targetDisplayTime: 20.12,
+            now: 20,
+            consecutiveLateFrames: 0,
+            frameDuration: 0.04
         ))
         XCTAssertTrue(NativeFrameCadence.requiresReanchor(
             presentationTime: 10.04,
             previousPresentationTime: 10,
-            currentMediaTime: 10.08
+            targetDisplayTime: 19.9,
+            now: 20,
+            consecutiveLateFrames: 2
         ))
-        XCTAssertTrue(NativeFrameCadence.requiresReanchor(
-            presentationTime: 10.2,
-            previousPresentationTime: 10,
-            currentMediaTime: 10.04,
-            frameDuration: 0.04
-        ))
+        XCTAssertTrue(NativeFrameCadence.isLate(targetDisplayTime: 19.9, now: 20))
     }
 
     func testOpeningWaitsForAFrameDecodedAfterTheClick() {

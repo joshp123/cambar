@@ -504,11 +504,15 @@ private final class CameraPixelBufferView: NSView {
     private var currentGeneration: String?
     private var previousPresentationTime: TimeInterval?
     private var previousArrivalTime: TimeInterval?
+    private var anchorPresentationTime: TimeInterval?
+    private var anchorHostTime: TimeInterval?
+    private var consecutiveLateFrames = 0
     private var estimatedFrameDuration = NativeFrameCadence.defaultFrameDuration
     private var cadenceWindowStartedAt = ProcessInfo.processInfo.systemUptime
     private var cadenceReceived = 0
     private var cadenceSubmitted = 0
     private var cadencePendingReplacements = 0
+    private var cadenceLateDrops = 0
     private var cadenceReanchors = 0
     private var cadenceFailures = 0
     private var cadenceJitterSamples = 0
@@ -707,14 +711,33 @@ private final class CameraPixelBufferView: NSView {
         updateCadenceEstimate(frame: frame, arrivedAt: now)
 
         let presentationTime = frame.presentationTime.seconds
-        let currentMediaTime = synchronizer.rate > 0 ? synchronizer.currentTime().seconds : nil
+        let targetDisplayTime: TimeInterval?
+        if let anchorPresentationTime, let anchorHostTime {
+            targetDisplayTime = anchorHostTime + presentationTime - anchorPresentationTime
+        } else {
+            targetDisplayTime = nil
+        }
         let generationChanged = currentGeneration != frame.generation
         let reanchor = generationChanged || NativeFrameCadence.requiresReanchor(
             presentationTime: presentationTime,
             previousPresentationTime: previousPresentationTime,
-            currentMediaTime: currentMediaTime,
+            targetDisplayTime: targetDisplayTime,
+            now: now,
+            consecutiveLateFrames: consecutiveLateFrames,
             frameDuration: estimatedFrameDuration
         )
+        let late = targetDisplayTime.map {
+            NativeFrameCadence.isLate(targetDisplayTime: $0, now: now)
+        } ?? false
+        if late, !reanchor {
+            consecutiveLateFrames += 1
+            previousPresentationTime = presentationTime
+            previousArrivalTime = now
+            cadenceLateDrops += 1
+            emitCadenceHeartbeatIfNeeded(now: now)
+            return EnqueueResult(accepted: true, presentationDelay: 0)
+        }
+        consecutiveLateFrames = 0
         let presentationLead = NativeFrameCadence.presentationLead(
             frameDuration: estimatedFrameDuration
         )
@@ -729,6 +752,7 @@ private final class CameraPixelBufferView: NSView {
                 previousPresentationTime = nil
                 previousArrivalTime = nil
             }
+            let anchorUptime = ProcessInfo.processInfo.systemUptime
             let hostTime = CMTimeAdd(
                 CMClockGetTime(CMClockGetHostTimeClock()),
                 CMTime(seconds: presentationLead, preferredTimescale: 1_000_000_000)
@@ -738,6 +762,8 @@ private final class CameraPixelBufferView: NSView {
                 time: frame.presentationTime,
                 atHostTime: hostTime
             )
+            anchorPresentationTime = presentationTime
+            anchorHostTime = anchorUptime + presentationLead
             cadenceReanchors += 1
         }
 
@@ -815,6 +841,9 @@ private final class CameraPixelBufferView: NSView {
         currentGeneration = nil
         previousPresentationTime = nil
         previousArrivalTime = nil
+        anchorPresentationTime = nil
+        anchorHostTime = nil
+        consecutiveLateFrames = 0
         estimatedFrameDuration = NativeFrameCadence.defaultFrameDuration
     }
 
@@ -871,13 +900,14 @@ private final class CameraPixelBufferView: NSView {
             event: "cadence_heartbeat",
             surface: surface,
             elapsedMilliseconds: Int(elapsed * 1_000),
-            detail: "received=\(cadenceReceived) submitted=\(cadenceSubmitted) pending_replacements=\(cadencePendingReplacements) max_client_depth=2 reanchors=\(cadenceReanchors) failures=\(cadenceFailures) estimated_fps=\(String(format: "%.2f", 1 / estimatedFrameDuration)) lead_ms=\(String(format: "%.2f", NativeFrameCadence.presentationLead(frameDuration: estimatedFrameDuration) * 1_000)) jitter_avg_ms=\(String(format: "%.2f", averageJitter)) jitter_max_ms=\(String(format: "%.2f", cadenceJitterMaximumMilliseconds))"
+            detail: "received=\(cadenceReceived) submitted=\(cadenceSubmitted) pending_replacements=\(cadencePendingReplacements) late_drops=\(cadenceLateDrops) max_client_depth=2 reanchors=\(cadenceReanchors) failures=\(cadenceFailures) estimated_fps=\(String(format: "%.2f", 1 / estimatedFrameDuration)) lead_ms=\(String(format: "%.2f", NativeFrameCadence.presentationLead(frameDuration: estimatedFrameDuration) * 1_000)) jitter_avg_ms=\(String(format: "%.2f", averageJitter)) jitter_max_ms=\(String(format: "%.2f", cadenceJitterMaximumMilliseconds))"
         )
         recordPerformanceMetrics()
         cadenceWindowStartedAt = now
         cadenceReceived = 0
         cadenceSubmitted = 0
         cadencePendingReplacements = 0
+        cadenceLateDrops = 0
         cadenceReanchors = 0
         cadenceFailures = 0
         cadenceJitterSamples = 0
@@ -890,6 +920,7 @@ private final class CameraPixelBufferView: NSView {
         cadenceReceived = 0
         cadenceSubmitted = 0
         cadencePendingReplacements = 0
+        cadenceLateDrops = 0
         cadenceReanchors = 0
         cadenceFailures = 0
         cadenceJitterSamples = 0

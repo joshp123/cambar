@@ -43,15 +43,25 @@ public enum NativeFrameCadence {
     public static func requiresReanchor(
         presentationTime: TimeInterval,
         previousPresentationTime: TimeInterval?,
-        currentMediaTime: TimeInterval?,
+        targetDisplayTime: TimeInterval?,
+        now: TimeInterval,
+        consecutiveLateFrames: Int,
         frameDuration: TimeInterval = defaultFrameDuration
     ) -> Bool {
         guard let previousPresentationTime,
-              let currentMediaTime else { return true }
+              let targetDisplayTime else { return true }
         return presentationTime <= previousPresentationTime
-            || presentationTime < currentMediaTime - minimumFrameDuration
-            || presentationTime > currentMediaTime + 2 * frameDuration
-            || abs(presentationTime - currentMediaTime) > discontinuityThreshold
+            || presentationTime - previousPresentationTime > discontinuityThreshold
+            || targetDisplayTime > now + 2 * frameDuration
+            || (isLate(targetDisplayTime: targetDisplayTime, now: now)
+                && consecutiveLateFrames >= 2)
+    }
+
+    public static func isLate(
+        targetDisplayTime: TimeInterval,
+        now: TimeInterval
+    ) -> Bool {
+        targetDisplayTime < now - minimumFrameDuration
     }
 }
 
