@@ -281,6 +281,14 @@ private actor CameraStreamWorker {
     private var lastHeartbeatAt: TimeInterval?
     private var decodedFrameCount: UInt64 = 0
     private var decodedAtLastHeartbeat: UInt64 = 0
+    private var encodedFrameCount: UInt64 = 0
+    private var encodedAtLastHeartbeat: UInt64 = 0
+    private var previousEncodedTimestamp: TimeInterval?
+    private var previousEncodedAt: TimeInterval?
+    private var encodedJitterSamples = 0
+    private var encodedJitterTotalMilliseconds = 0.0
+    private var encodedJitterMaximumMilliseconds = 0.0
+    private var encodedGapMaximumMilliseconds = 0.0
     private var nextFrameSequence: UInt64 = 0
     private var failureCount = 0
     private var firstFrameEmitted = false
@@ -393,6 +401,11 @@ private actor CameraStreamWorker {
         lastHeartbeatAt = generationStartedAt
         decodedFrameCount = 0
         decodedAtLastHeartbeat = 0
+        encodedFrameCount = 0
+        encodedAtLastHeartbeat = 0
+        previousEncodedTimestamp = nil
+        previousEncodedAt = nil
+        resetEncodedCadenceWindow()
         firstFrameEmitted = false
 
         DirectStreamTelemetry.record(
@@ -435,7 +448,7 @@ private actor CameraStreamWorker {
         for try await item in session.frames() {
             guard desiredRunning, !permanentlyStopped, !Task.isCancelled else { break }
             guard case let .video(frame) = item else { continue }
-            lastEncodedAt = ProcessInfo.processInfo.systemUptime
+            recordEncodedFrame(timestamp: frame.timestamp)
 
             if H264StreamContinuity.isDiscontinuous(packetLoss: frame.loss) {
                 decoder?.invalidate()
@@ -592,18 +605,57 @@ private actor CameraStreamWorker {
         }
         if let lastHeartbeatAt, now - lastHeartbeatAt >= 5 {
             let decodedSinceHeartbeat = decodedFrameCount - decodedAtLastHeartbeat
+            let encodedSinceHeartbeat = encodedFrameCount - encodedAtLastHeartbeat
             let frameAge = lastDecodedAt.map { Int((now - $0) * 1_000) }
+            let averageEncodedJitter = encodedJitterSamples > 0
+                ? encodedJitterTotalMilliseconds / Double(encodedJitterSamples)
+                : 0
             DirectStreamTelemetry.record(
                 component: "video",
                 event: "frame_heartbeat",
                 videoSessionID: generation,
                 elapsedMilliseconds: frameAge,
-                detail: "decoded_frames=\(decodedFrameCount) interval_frames=\(decodedSinceHeartbeat)"
+                detail: "decoded_frames=\(decodedFrameCount) decoded_interval=\(decodedSinceHeartbeat) encoded_frames=\(encodedFrameCount) encoded_interval=\(encodedSinceHeartbeat) encoded_jitter_avg_ms=\(String(format: "%.2f", averageEncodedJitter)) encoded_jitter_max_ms=\(String(format: "%.2f", encodedJitterMaximumMilliseconds)) encoded_gap_max_ms=\(String(format: "%.2f", encodedGapMaximumMilliseconds))"
             )
             self.lastHeartbeatAt = now
             decodedAtLastHeartbeat = decodedFrameCount
+            encodedAtLastHeartbeat = encodedFrameCount
+            resetEncodedCadenceWindow()
         }
         return false
+    }
+
+    private func recordEncodedFrame(timestamp: TimeInterval) {
+        let now = ProcessInfo.processInfo.systemUptime
+        lastEncodedAt = now
+        encodedFrameCount += 1
+        if let previousEncodedTimestamp, let previousEncodedAt {
+            let presentationDelta = timestamp - previousEncodedTimestamp
+            let arrivalDelta = now - previousEncodedAt
+            encodedGapMaximumMilliseconds = max(
+                encodedGapMaximumMilliseconds,
+                arrivalDelta * 1_000
+            )
+            if presentationDelta > 0,
+               presentationDelta <= NativeFrameCadence.maximumFrameDuration {
+                let jitterMilliseconds = abs(arrivalDelta - presentationDelta) * 1_000
+                encodedJitterSamples += 1
+                encodedJitterTotalMilliseconds += jitterMilliseconds
+                encodedJitterMaximumMilliseconds = max(
+                    encodedJitterMaximumMilliseconds,
+                    jitterMilliseconds
+                )
+            }
+        }
+        previousEncodedTimestamp = timestamp
+        previousEncodedAt = now
+    }
+
+    private func resetEncodedCadenceWindow() {
+        encodedJitterSamples = 0
+        encodedJitterTotalMilliseconds = 0
+        encodedJitterMaximumMilliseconds = 0
+        encodedGapMaximumMilliseconds = 0
     }
 
     private func stopGeneration(reason: String) async {

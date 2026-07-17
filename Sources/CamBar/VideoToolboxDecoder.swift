@@ -207,7 +207,7 @@ final class VideoToolboxDecoder: @unchecked Sendable {
         status = VTDecompressionSessionDecodeFrame(
             currentSession,
             sampleBuffer: sampleBuffer,
-            flags: .asynchronousLowPowerRealtime,
+            flags: .asynchronousRealtime,
             frameRefcon: nil,
             infoFlagsOut: &infoFlags,
         )
@@ -335,8 +335,7 @@ final class VideoToolboxDecoder: @unchecked Sendable {
 }
 
 private extension VTDecodeFrameFlags {
-    /// Decode asynchronously and permit VideoToolbox's low-power 1x mode.
-    static let asynchronousLowPowerRealtime = VTDecodeFrameFlags(
-        rawValue: (1 << 0) | (1 << 2)
-    )
+    /// Decode asynchronously without the 1x-only low-power hint. A live stream
+    /// must be able to catch up promptly after a short scheduling stall.
+    static let asynchronousRealtime = VTDecodeFrameFlags(rawValue: 1 << 0)
 }
