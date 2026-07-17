@@ -11,6 +11,7 @@ private let telemetryURL = FileManager.default.homeDirectoryForCurrentUser
 private struct Options {
     var reopenCycles = 3
     var firstOpenIdleSeconds: TimeInterval = 35
+    var visibleSoakSeconds: TimeInterval = 0
     var screenshotPath = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
         .appendingPathComponent(".build/smoke-ui-popover.png").path
 
@@ -40,8 +41,16 @@ private struct Options {
                 }
                 result.firstOpenIdleSeconds = seconds
                 arguments.removeFirst()
+            case "--visible-soak":
+                guard let value = arguments.first,
+                      let seconds = TimeInterval(value),
+                      seconds == 0 || seconds >= 5 else {
+                    throw SmokeError.message("--visible-soak requires 0 or at least 5 seconds")
+                }
+                result.visibleSoakSeconds = seconds
+                arguments.removeFirst()
             case "-h", "--help":
-                print("Usage: smoke_ui.sh [--reopen-cycles COUNT] [--first-open-idle SECONDS] [--screenshot PATH]")
+                print("Usage: smoke_ui.sh [--reopen-cycles COUNT] [--first-open-idle SECONDS] [--visible-soak SECONDS] [--screenshot PATH]")
                 exit(0)
             default:
                 throw SmokeError.message("unknown argument: \(argument)")
@@ -963,6 +972,25 @@ private func run() throws {
         processIdentifier: application.processIdentifier,
         path: screenshotPath(for: 1, basePath: options.screenshotPath) + ".cold.png"
     )
+    if options.visibleSoakSeconds > 0 {
+        RunLoop.current.run(until: Date().addingTimeInterval(options.visibleSoakSeconds))
+        _ = try telemetry.waitForEvent(
+            "cadence_heartbeat",
+            timeout: 2,
+            component: "renderer",
+            surface: "menu",
+            afterUptimeMilliseconds: coldLiveView.uptimeMilliseconds
+        )
+        _ = try telemetry.waitForEvent(
+            "performance_heartbeat",
+            timeout: 2,
+            component: "renderer",
+            surface: "menu",
+            afterUptimeMilliseconds: coldLiveView.uptimeMilliseconds
+        )
+        try telemetry.assertNoFailures()
+        print("PASS: visible cadence soak \(Int(options.visibleSoakSeconds))s")
+    }
     try driver.clickStatusItem()
     _ = try telemetry.waitForEvent(
         "menu_closed",
