@@ -974,6 +974,17 @@ private func run() throws {
     )
     if options.visibleSoakSeconds > 0 {
         RunLoop.current.run(until: Date().addingTimeInterval(options.visibleSoakSeconds))
+        let prematureClose = try telemetry.matchingEvents(
+            "menu_closed",
+            component: "app",
+            surface: "menu"
+        ).contains {
+            $0.openID == coldOpenID
+                && $0.uptimeMilliseconds >= coldLiveView.uptimeMilliseconds
+        }
+        guard !prematureClose else {
+            throw SmokeError.message("menu closed before the visible cadence soak completed")
+        }
         _ = try telemetry.waitForEvent(
             "cadence_heartbeat",
             timeout: 2,
