@@ -36,7 +36,10 @@ final class CameraPlaybackController {
     ) {
         self.stream = stream
         self.surface = surface
-        self.container = CameraVideoContainerView(cornerStyle: cornerStyle)
+        self.container = CameraVideoContainerView(
+            surface: surface.rawValue,
+            cornerStyle: cornerStyle
+        )
         container.onIndicatorShown = { [weak self] in
             self?.recordConnectionIndicatorShown()
         }
@@ -353,15 +356,16 @@ final class CameraVideoContainerView: NSView {
         didSet { pixelBufferView.onDisplayReadinessLost = onRendererLostDisplay }
     }
 
-    private let pixelBufferView = CameraPixelBufferView()
+    private let pixelBufferView: CameraPixelBufferView
     private let cover = NSView()
     private let progressIndicator = NSProgressIndicator()
     private let loadingLabel = NSTextField(labelWithString: "Connecting…")
     private var cornerStyle: CameraVideoCornerStyle
     private var indicatorTask: Task<Void, Never>?
 
-    init(cornerStyle: CameraVideoCornerStyle) {
+    init(surface: String, cornerStyle: CameraVideoCornerStyle) {
         self.cornerStyle = cornerStyle
+        self.pixelBufferView = CameraPixelBufferView(surface: surface)
         super.init(frame: .zero)
         wantsLayer = true
         layer?.backgroundColor = NSColor.black.cgColor
@@ -496,12 +500,35 @@ private final class CameraPixelBufferView: NSView {
     private var expectsNotReady = false
     private var readinessObserver: NSObjectProtocol?
     private var currentSurfaceAttemptID: UInt64 = 0
+    private let surface: String
+    private var currentGeneration: String?
+    private var previousPresentationTime: TimeInterval?
+    private var previousArrivalTime: TimeInterval?
+    private var estimatedFrameDuration = NativeFrameCadence.defaultFrameDuration
+    private var cadenceWindowStartedAt = ProcessInfo.processInfo.systemUptime
+    private var cadenceReceived = 0
+    private var cadenceSubmitted = 0
+    private var cadencePendingReplacements = 0
+    private var cadenceReanchors = 0
+    private var cadenceFailures = 0
+    private var cadenceJitterSamples = 0
+    private var cadenceJitterTotalMilliseconds = 0.0
+    private var cadenceJitterMaximumMilliseconds = 0.0
+    private var performanceMetricsPending = false
+    private var previousPerformanceFrames = 0
+    private var previousPerformanceDrops = 0
+    private var previousPerformanceDelay = 0.0
+    private var pendingFrame: CameraFrame?
+    private var drainTask: Task<Void, Never>?
+    private var drainID: UInt64 = 0
 
-    override init(frame frameRect: NSRect) {
+    init(surface: String) {
+        self.surface = surface
         receiver = synchronizer.sampleBufferReceiver(
             adding: displayLayer.sampleBufferRenderer
         )
-        super.init(frame: frameRect)
+        super.init(frame: .zero)
+        synchronizer.delaysRateChangeUntilHasSufficientMediaData = false
         wantsLayer = true
         layer = displayLayer
         displayLayer.videoGravity = .resizeAspectFill
@@ -517,18 +544,19 @@ private final class CameraPixelBufferView: NSView {
         }
     }
 
-    convenience init() {
-        self.init(frame: .zero)
-    }
-
     @available(*, unavailable)
     required init?(coder: NSCoder) { nil }
 
     func present(_ frame: CameraFrame) -> Bool {
-        enqueue(frame)
+        offer(frame)
+        return true
     }
 
     func shutdown() {
+        drainID &+= 1
+        drainTask?.cancel()
+        drainTask = nil
+        pendingFrame = nil
         if let readinessObserver {
             NotificationCenter.default.removeObserver(readinessObserver)
             self.readinessObserver = nil
@@ -540,6 +568,11 @@ private final class CameraPixelBufferView: NSView {
 
     func beginSurfaceAttempt(_ attemptID: UInt64) {
         currentSurfaceAttemptID = max(currentSurfaceAttemptID, attemptID)
+        drainID &+= 1
+        drainTask?.cancel()
+        drainTask = nil
+        pendingFrame = nil
+        finishCadenceWindow()
     }
 
     func prepareForOpen(attemptID: UInt64) async -> Bool {
@@ -547,7 +580,10 @@ private final class CameraPixelBufferView: NSView {
             guard !Task.isCancelled,
                   attemptID == currentSurfaceAttemptID else { return false }
             expectsNotReady = true
+            synchronizer.rate = 0
             await receiver.flush(removingDisplayedImage: true)
+            resetTimeline()
+            resetCadenceWindow()
             return !Task.isCancelled && attemptID == currentSurfaceAttemptID
         }
     }
@@ -556,12 +592,20 @@ private final class CameraPixelBufferView: NSView {
         await withExclusiveOperation {
             guard !Task.isCancelled,
                   attemptID == currentSurfaceAttemptID else { return false }
-            if !enqueue(frame) {
+            cadenceReceived += 1
+            var result = await enqueue(frame)
+            if !result.accepted {
                 expectsNotReady = true
                 await receiver.flush(removingDisplayedImage: true)
+                resetTimeline()
                 guard !Task.isCancelled,
                       attemptID == currentSurfaceAttemptID else { return false }
-                guard enqueue(frame) else { return false }
+                result = await enqueue(frame)
+                guard result.accepted else { return false }
+            }
+
+            if result.presentationDelay > 0 {
+                try? await Task.sleep(for: .seconds(result.presentationDelay))
             }
             var acceptedImage = false
             for _ in 0..<100 {
@@ -616,17 +660,100 @@ private final class CameraPixelBufferView: NSView {
         onDisplayReadinessLost?()
     }
 
-    private func enqueue(_ frame: CameraFrame) -> Bool {
+    private struct EnqueueResult {
+        let accepted: Bool
+        let presentationDelay: TimeInterval
+    }
+
+    private func offer(_ frame: CameraFrame) {
+        cadenceReceived += 1
+        if drainTask != nil {
+            if pendingFrame != nil {
+                cadencePendingReplacements += 1
+            }
+            pendingFrame = frame
+            return
+        }
+        startDrain(with: frame)
+    }
+
+    private func startDrain(with firstFrame: CameraFrame) {
+        drainID &+= 1
+        let currentDrainID = drainID
+        drainTask = Task { [weak self] in
+            guard let self else { return }
+            var frame: CameraFrame? = firstFrame
+            while let currentFrame = frame, !Task.isCancelled {
+                let result = await self.enqueue(currentFrame)
+                guard self.drainID == currentDrainID else { return }
+                guard result.accepted else {
+                    self.pendingFrame = nil
+                    if !Task.isCancelled {
+                        self.onDisplayReadinessLost?()
+                    }
+                    break
+                }
+                frame = self.pendingFrame
+                self.pendingFrame = nil
+            }
+            if self.drainID == currentDrainID {
+                self.drainTask = nil
+            }
+        }
+    }
+
+    private func enqueue(_ frame: CameraFrame) async -> EnqueueResult {
+        let now = ProcessInfo.processInfo.systemUptime
+        updateCadenceEstimate(frame: frame, arrivedAt: now)
+
+        let presentationTime = frame.presentationTime.seconds
+        let currentMediaTime = synchronizer.rate > 0 ? synchronizer.currentTime().seconds : nil
+        let generationChanged = currentGeneration != frame.generation
+        let reanchor = generationChanged || NativeFrameCadence.requiresReanchor(
+            presentationTime: presentationTime,
+            previousPresentationTime: previousPresentationTime,
+            currentMediaTime: currentMediaTime,
+            frameDuration: estimatedFrameDuration
+        )
+        let presentationLead = NativeFrameCadence.presentationLead(
+            frameDuration: estimatedFrameDuration
+        )
+        if reanchor {
+            if currentGeneration != nil {
+                expectsNotReady = true
+                synchronizer.rate = 0
+                await receiver.flush(removingDisplayedImage: false)
+                guard !Task.isCancelled else {
+                    return EnqueueResult(accepted: false, presentationDelay: 0)
+                }
+                previousPresentationTime = nil
+                previousArrivalTime = nil
+            }
+            let hostTime = CMTimeAdd(
+                CMClockGetTime(CMClockGetHostTimeClock()),
+                CMTime(seconds: presentationLead, preferredTimescale: 1_000_000_000)
+            )
+            synchronizer.setRate(
+                1,
+                time: frame.presentationTime,
+                atHostTime: hostTime
+            )
+            cadenceReanchors += 1
+        }
+
         var formatDescription: CMVideoFormatDescription?
         guard CMVideoFormatDescriptionCreateForImageBuffer(
             allocator: kCFAllocatorDefault,
             imageBuffer: frame.pixelBuffer,
             formatDescriptionOut: &formatDescription
         ) == noErr,
-        let formatDescription else { return false }
+        let formatDescription else {
+            recordCadenceFailure("format_description")
+            return EnqueueResult(accepted: false, presentationDelay: 0)
+        }
 
         var timing = CMSampleTimingInfo(
-            duration: .invalid,
+            duration: CMTime(seconds: estimatedFrameDuration, preferredTimescale: 90_000),
             presentationTimeStamp: frame.presentationTime,
             decodeTimeStamp: .invalid
         )
@@ -638,21 +765,34 @@ private final class CameraPixelBufferView: NSView {
             sampleTiming: &timing,
             sampleBufferOut: &sampleBuffer
         ) == noErr,
-        let sampleBuffer else { return false }
-
-        let attachments = CMSampleBufferGetSampleAttachmentsArray(
-            sampleBuffer,
-            createIfNecessary: true
-        ) as NSArray?
-        if let first = attachments?.firstObject as? NSMutableDictionary {
-            first[kCMSampleAttachmentKey_DisplayImmediately] = true
+        let sampleBuffer else {
+            recordCadenceFailure("sample_buffer")
+            return EnqueueResult(accepted: false, presentationDelay: 0)
         }
+
+        currentGeneration = frame.generation
+        previousPresentationTime = presentationTime
         let ready = CMReadySampleBuffer<CMSampleBuffer.DynamicContent>(
             unsafeBuffer: sampleBuffer
         )
-        switch receiver.enqueueImmediately(ready) {
+        let enqueueResult: AVSampleBufferVideoRenderer.Receiver.EnqueueResult
+        do {
+            enqueueResult = try await receiver.enqueue(ready)
+        } catch {
+            if !Task.isCancelled {
+                recordCadenceFailure("enqueue_error=\(error)")
+            }
+            return EnqueueResult(accepted: false, presentationDelay: 0)
+        }
+        switch enqueueResult {
         case .enqueued:
-            return true
+            cadenceSubmitted += 1
+            expectsNotReady = false
+            emitCadenceHeartbeatIfNeeded(now: now)
+            return EnqueueResult(
+                accepted: true,
+                presentationDelay: reanchor ? presentationLead : 0
+            )
         case let .enqueuedWithDecodeFailures(error):
             recordRendererFailure("decode_failure=\(error)")
         case .cancelledDueToFlush:
@@ -666,7 +806,127 @@ private final class CameraPixelBufferView: NSView {
         @unknown default:
             recordRendererFailure("unknown_enqueue_result")
         }
-        return false
+        cadenceFailures += 1
+        emitCadenceHeartbeatIfNeeded(now: now)
+        return EnqueueResult(accepted: false, presentationDelay: 0)
+    }
+
+    private func resetTimeline() {
+        currentGeneration = nil
+        previousPresentationTime = nil
+        previousArrivalTime = nil
+        estimatedFrameDuration = NativeFrameCadence.defaultFrameDuration
+    }
+
+    private func updateCadenceEstimate(frame: CameraFrame, arrivedAt: TimeInterval) {
+        let presentationTime = frame.presentationTime.seconds
+        if let previousPresentationTime {
+            let presentationDelta = presentationTime - previousPresentationTime
+            estimatedFrameDuration = NativeFrameCadence.updatedFrameDuration(
+                current: estimatedFrameDuration,
+                presentationDelta: presentationDelta
+            )
+            if let previousArrivalTime,
+               presentationDelta > 0,
+               presentationDelta <= NativeFrameCadence.maximumFrameDuration {
+                let arrivalDelta = arrivedAt - previousArrivalTime
+                let jitterMilliseconds = abs(arrivalDelta - presentationDelta) * 1_000
+                cadenceJitterSamples += 1
+                cadenceJitterTotalMilliseconds += jitterMilliseconds
+                cadenceJitterMaximumMilliseconds = max(
+                    cadenceJitterMaximumMilliseconds,
+                    jitterMilliseconds
+                )
+            }
+        }
+        previousArrivalTime = arrivedAt
+    }
+
+    private func recordCadenceFailure(_ reason: String) {
+        cadenceFailures += 1
+        recordRendererFailure(reason)
+        emitCadenceHeartbeatIfNeeded(now: ProcessInfo.processInfo.systemUptime)
+    }
+
+    private func emitCadenceHeartbeatIfNeeded(now: TimeInterval) {
+        emitCadenceHeartbeat(now: now, force: false)
+    }
+
+    private func finishCadenceWindow() {
+        emitCadenceHeartbeat(
+            now: ProcessInfo.processInfo.systemUptime,
+            force: true
+        )
+    }
+
+    private func emitCadenceHeartbeat(now: TimeInterval, force: Bool) {
+        let elapsed = now - cadenceWindowStartedAt
+        guard cadenceReceived > 0,
+              force || elapsed >= 5 else { return }
+        let averageJitter = cadenceJitterSamples > 0
+            ? cadenceJitterTotalMilliseconds / Double(cadenceJitterSamples)
+            : 0
+        DirectStreamTelemetry.record(
+            component: "renderer",
+            event: "cadence_heartbeat",
+            surface: surface,
+            elapsedMilliseconds: Int(elapsed * 1_000),
+            detail: "received=\(cadenceReceived) submitted=\(cadenceSubmitted) pending_replacements=\(cadencePendingReplacements) max_client_depth=2 reanchors=\(cadenceReanchors) failures=\(cadenceFailures) estimated_fps=\(String(format: "%.2f", 1 / estimatedFrameDuration)) lead_ms=\(String(format: "%.2f", NativeFrameCadence.presentationLead(frameDuration: estimatedFrameDuration) * 1_000)) jitter_avg_ms=\(String(format: "%.2f", averageJitter)) jitter_max_ms=\(String(format: "%.2f", cadenceJitterMaximumMilliseconds))"
+        )
+        recordPerformanceMetrics()
+        cadenceWindowStartedAt = now
+        cadenceReceived = 0
+        cadenceSubmitted = 0
+        cadencePendingReplacements = 0
+        cadenceReanchors = 0
+        cadenceFailures = 0
+        cadenceJitterSamples = 0
+        cadenceJitterTotalMilliseconds = 0
+        cadenceJitterMaximumMilliseconds = 0
+    }
+
+    private func resetCadenceWindow() {
+        cadenceWindowStartedAt = ProcessInfo.processInfo.systemUptime
+        cadenceReceived = 0
+        cadenceSubmitted = 0
+        cadencePendingReplacements = 0
+        cadenceReanchors = 0
+        cadenceFailures = 0
+        cadenceJitterSamples = 0
+        cadenceJitterTotalMilliseconds = 0
+        cadenceJitterMaximumMilliseconds = 0
+    }
+
+    private func recordPerformanceMetrics() {
+        guard !performanceMetricsPending else { return }
+        performanceMetricsPending = true
+        Task { [weak self] in
+            guard let self else { return }
+            let metrics = await self.displayLayer.sampleBufferRenderer.videoPerformanceMetrics
+            self.performanceMetricsPending = false
+            guard let metrics else { return }
+            let frames = metrics.totalNumberOfFrames
+            let drops = metrics.numberOfDroppedFrames
+            let delay = metrics.totalAccumulatedFrameDelay
+            let frameDelta = frames >= self.previousPerformanceFrames
+                ? frames - self.previousPerformanceFrames
+                : frames
+            let dropDelta = drops >= self.previousPerformanceDrops
+                ? drops - self.previousPerformanceDrops
+                : drops
+            let delayDelta = delay >= self.previousPerformanceDelay
+                ? delay - self.previousPerformanceDelay
+                : delay
+            DirectStreamTelemetry.record(
+                component: "renderer",
+                event: "performance_heartbeat",
+                surface: self.surface,
+                detail: "frames=\(frameDelta) dropped=\(dropDelta) corrupted_total=\(metrics.numberOfCorruptedFrames) accumulated_delay_ms=\(String(format: "%.2f", delayDelta * 1_000))"
+            )
+            self.previousPerformanceFrames = frames
+            self.previousPerformanceDrops = drops
+            self.previousPerformanceDelay = delay
+        }
     }
 
     private func recordRendererFailure(_ detail: String) {

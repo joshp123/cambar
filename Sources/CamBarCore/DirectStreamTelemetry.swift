@@ -104,7 +104,20 @@ public enum DirectStreamTelemetry {
         )
         let size = (try? logURL.resourceValues(forKeys: [.fileSizeKey]).fileSize).map(UInt64.init) ?? 0
         if size >= maximumLogBytes {
-            try? Data().write(to: logURL, options: .atomic)
+            retainNewestHalfOfLog()
         }
+    }
+
+    private static func retainNewestHalfOfLog() {
+        guard let data = try? Data(contentsOf: logURL), !data.isEmpty else { return }
+        let suffix = data[(data.count / 2)...]
+        let newline = suffix.firstIndex(of: 0x0A)
+        let retained: Data
+        if let newline, newline < data.index(before: data.endIndex) {
+            retained = Data(data[data.index(after: newline)...])
+        } else {
+            retained = Data()
+        }
+        try? retained.write(to: logURL, options: .atomic)
     }
 }

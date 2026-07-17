@@ -20,6 +20,41 @@ public enum NativeFrameFreshness {
     }
 }
 
+public enum NativeFrameCadence {
+    public static let defaultFrameDuration: TimeInterval = 1.0 / 25.0
+    public static let minimumFrameDuration: TimeInterval = 1.0 / 60.0
+    public static let maximumFrameDuration: TimeInterval = 1.0 / 10.0
+    public static let discontinuityThreshold: TimeInterval = 0.5
+
+    public static func updatedFrameDuration(
+        current: TimeInterval,
+        presentationDelta: TimeInterval
+    ) -> TimeInterval {
+        guard presentationDelta >= minimumFrameDuration,
+              presentationDelta <= maximumFrameDuration,
+              presentationDelta <= current * 1.5 else { return current }
+        return current * 0.8 + presentationDelta * 0.2
+    }
+
+    public static func presentationLead(frameDuration: TimeInterval) -> TimeInterval {
+        min(max(frameDuration, minimumFrameDuration), 0.05)
+    }
+
+    public static func requiresReanchor(
+        presentationTime: TimeInterval,
+        previousPresentationTime: TimeInterval?,
+        currentMediaTime: TimeInterval?,
+        frameDuration: TimeInterval = defaultFrameDuration
+    ) -> Bool {
+        guard let previousPresentationTime,
+              let currentMediaTime else { return true }
+        return presentationTime <= previousPresentationTime
+            || presentationTime < currentMediaTime - minimumFrameDuration
+            || presentationTime > currentMediaTime + 2 * frameDuration
+            || abs(presentationTime - currentMediaTime) > discontinuityThreshold
+    }
+}
+
 public enum NativeStreamRetryPolicy {
     public static func delay(afterFailure failureCount: Int) -> TimeInterval {
         let delays: [TimeInterval] = [0.1, 0.5, 2, 5]

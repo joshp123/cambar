@@ -310,6 +310,62 @@ final class CamBarTests: XCTestCase {
         XCTAssertFalse(NativeFrameFreshness.canPresentCachedFrame(now: 10, decodedAt: 10.001))
     }
 
+    func testFrameCadenceTracksPlausiblePresentationDeltas() {
+        XCTAssertEqual(
+            NativeFrameCadence.updatedFrameDuration(current: 0.04, presentationDelta: 0.05),
+            0.042,
+            accuracy: 0.000_001
+        )
+        XCTAssertEqual(
+            NativeFrameCadence.updatedFrameDuration(current: 0.04, presentationDelta: 0.5),
+            0.04,
+            accuracy: 0.000_001
+        )
+    }
+
+    func testFrameCadenceUsesOneBoundedFrameOfLead() {
+        XCTAssertEqual(NativeFrameCadence.presentationLead(frameDuration: 0.04), 0.04)
+        XCTAssertEqual(
+            NativeFrameCadence.presentationLead(frameDuration: 0.001),
+            NativeFrameCadence.minimumFrameDuration
+        )
+        XCTAssertEqual(NativeFrameCadence.presentationLead(frameDuration: 0.1), 0.05)
+    }
+
+    func testFrameCadenceReanchorsOnlyForMissingOrBrokenTimeline() {
+        XCTAssertTrue(NativeFrameCadence.requiresReanchor(
+            presentationTime: 10,
+            previousPresentationTime: nil,
+            currentMediaTime: nil
+        ))
+        XCTAssertFalse(NativeFrameCadence.requiresReanchor(
+            presentationTime: 10.04,
+            previousPresentationTime: 10,
+            currentMediaTime: 10
+        ))
+        XCTAssertTrue(NativeFrameCadence.requiresReanchor(
+            presentationTime: 10,
+            previousPresentationTime: 10,
+            currentMediaTime: 10
+        ))
+        XCTAssertTrue(NativeFrameCadence.requiresReanchor(
+            presentationTime: 11,
+            previousPresentationTime: 10,
+            currentMediaTime: 10.04
+        ))
+        XCTAssertTrue(NativeFrameCadence.requiresReanchor(
+            presentationTime: 10.04,
+            previousPresentationTime: 10,
+            currentMediaTime: 10.08
+        ))
+        XCTAssertTrue(NativeFrameCadence.requiresReanchor(
+            presentationTime: 10.2,
+            previousPresentationTime: 10,
+            currentMediaTime: 10.04,
+            frameDuration: 0.04
+        ))
+    }
+
     func testOpeningWaitsForAFrameDecodedAfterTheClick() {
         XCTAssertTrue(NativeFrameFreshness.isPostOpenFrame(
             sequence: 42,
