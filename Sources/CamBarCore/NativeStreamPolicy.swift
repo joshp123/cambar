@@ -63,13 +63,6 @@ public enum NativeFrameCadence {
         targetDisplayTime < now - minimumFrameDuration
     }
 
-    public static func admissionDelay(
-        targetDisplayTime: TimeInterval,
-        now: TimeInterval,
-        frameDuration: TimeInterval
-    ) -> TimeInterval {
-        max(0, targetDisplayTime - now - 2 * frameDuration)
-    }
 }
 
 public enum NativeStreamRetryPolicy {

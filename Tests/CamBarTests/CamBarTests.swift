@@ -390,24 +390,6 @@ final class CamBarTests: XCTestCase {
             consecutiveLateFrames: 2
         ))
         XCTAssertTrue(NativeFrameCadence.isLate(targetDisplayTime: 19.9, now: 20))
-        XCTAssertEqual(
-            NativeFrameCadence.admissionDelay(
-                targetDisplayTime: 20.2,
-                now: 20,
-                frameDuration: 0.04
-            ),
-            0.12,
-            accuracy: 0.000_001
-        )
-        XCTAssertEqual(
-            NativeFrameCadence.admissionDelay(
-                targetDisplayTime: 20.04,
-                now: 20,
-                frameDuration: 0.04
-            ),
-            0,
-            accuracy: 0.000_001
-        )
     }
 
     func testOpeningWaitsForAFrameDecodedAfterTheClick() {
