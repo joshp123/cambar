@@ -1,97 +1,57 @@
 #!/usr/bin/env bash
+# Test, build, install and restart CamBar in the background, then confirm from
+# its log that live video arrived and that it opened no UI by itself.
 set -euo pipefail
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 cd "$ROOT"
+APP="$HOME/Applications/CamBar.app"
+EXECUTABLE="$APP/Contents/MacOS/CamBar"
+LOG="$HOME/Library/Caches/CamBar/direct/direct-stream-events.jsonl"
 
-APP_NAME=CamBar
-BUILT_APP="$ROOT/.build/package/$APP_NAME.app"
-APP="$HOME/Applications/$APP_NAME.app"
-NEW_APP="$HOME/Applications/.$APP_NAME.app.new"
-PREVIOUS_APP="$HOME/Applications/.$APP_NAME.app.previous"
-ROLLBACK_DIR="$HOME/Library/Caches/CamBar/rollback"
-ROLLBACK_ZIP="$ROLLBACK_DIR/$APP_NAME-previous.zip"
+fail() { echo "ERROR: $*" >&2; exit 1; }
 
-if [[ $# -gt 0 ]]; then
-  echo "Usage: $(basename "$0")" >&2
-  exit 2
-fi
+[[ -z "$(git status --porcelain --untracked-files=all)" ]] \
+  || fail "commit first, so the installed build matches a real commit"
 
-if [[ -n "$(git status --porcelain --untracked-files=all)" ]]; then
-  echo "ERROR: refusing to deploy a dirty working tree." >&2
-  exit 1
-fi
-if [[ ! -d "$BUILT_APP" ]]; then
-  echo "ERROR: missing staged app; run Scripts/package_app.sh first." >&2
-  exit 1
-fi
-if [[ "$(/usr/libexec/PlistBuddy -c 'Print :GitCommit' "$BUILT_APP/Contents/Info.plist")" != "$(git rev-parse --short HEAD)" ]]; then
-  echo "ERROR: staged app does not match HEAD; rebuild before deploying." >&2
-  exit 1
-fi
-if pgrep -f "$APP/Contents/MacOS/$APP_NAME" >/dev/null; then
-  echo "ERROR: quit CamBar before deployment; this script will not kill a live app." >&2
-  exit 1
-fi
+swift test -q
+"$ROOT/Scripts/package_app.sh" release
 
-"$ROOT/Scripts/verify_release_safety.sh"
+pkill -TERM -f "$EXECUTABLE" 2>/dev/null || true
+for _ in {1..50}; do pgrep -f "$EXECUTABLE" >/dev/null || break; sleep 0.1; done
+pgrep -f "$EXECUTABLE" >/dev/null && fail "running CamBar did not quit"
 
-if [[ -e "$APP" ]]; then
-  CURRENT_REQUIREMENT=$(codesign -dr - "$APP" 2>&1 | sed -n 's/^designated => //p')
-  STAGED_REQUIREMENT=$(codesign -dr - "$BUILT_APP" 2>&1 | sed -n 's/^designated => //p')
-  if [[ -z "$CURRENT_REQUIREMENT" || -z "$STAGED_REQUIREMENT" ]]; then
-    echo "ERROR: could not read app signing requirement." >&2
-    exit 1
-  fi
-  if [[ "$CURRENT_REQUIREMENT" != "$STAGED_REQUIREMENT" ]]; then
-    echo "ERROR: app signing requirement changed; refusing deployment." >&2
-    exit 1
-  fi
-fi
-
-mkdir -p "$HOME/Applications" "$ROLLBACK_DIR"
-if [[ -e "$NEW_APP" ]]; then
-  trash "$NEW_APP"
-fi
-if [[ -e "$PREVIOUS_APP" ]]; then
-  trash "$PREVIOUS_APP"
-fi
-ditto "$BUILT_APP" "$NEW_APP"
-codesign --verify --deep --strict "$NEW_APP"
-
-had_previous=0
-if [[ -e "$APP" ]]; then
-  had_previous=1
-  if [[ -e "$ROLLBACK_ZIP" ]]; then
-    trash "$ROLLBACK_ZIP"
-  fi
-  ditto -c -k --keepParent "$APP" "$ROLLBACK_ZIP"
-  mv "$APP" "$PREVIOUS_APP"
-fi
-
-rollback() {
-  local exit_code=$?
-  trap - EXIT
-  set +e
-  local rollback_failed=0
-  if [[ -e "$APP" ]]; then
-    trash "$APP" || rollback_failed=1
-  fi
-  if [[ "$had_previous" == "1" && -e "$PREVIOUS_APP" ]]; then
-    mv "$PREVIOUS_APP" "$APP" || rollback_failed=1
-  fi
-  if [[ "$rollback_failed" != "0" ]]; then
-    echo "ERROR: deployment failed and automatic rollback was incomplete." >&2
-  fi
-  exit "$exit_code"
-}
-trap rollback EXIT
-
-mv "$NEW_APP" "$APP"
+# Update the bundle in place: a stable path and signature keep the Local
+# Network permission and login item attached to the same app.
+mkdir -p "$APP"
+rsync -a --delete "$ROOT/.build/package/CamBar.app/" "$APP/"
 codesign --verify --deep --strict "$APP"
-trap - EXIT
-if [[ -e "$PREVIOUS_APP" ]]; then
-  trash "$PREVIOUS_APP"
+
+previous_session=$(jq -r 'select(.event == "launch") | .session_id' "$LOG" 2>/dev/null | tail -n 1)
+open -gj "$APP"
+
+session=""
+first_frame=""
+for _ in {1..30}; do
+  sleep 0.5
+  session=$(jq -r 'select(.event == "launch") | .session_id' "$LOG" 2>/dev/null | tail -n 1)
+  [[ -n "$session" && "$session" != "$previous_session" ]] || continue
+  first_frame=$(jq -r --arg s "$session" \
+    'select(.session_id == $s and .event == "first_frame") | .elapsed_ms' "$LOG" | head -n 1)
+  [[ -n "$first_frame" ]] && break
+done
+[[ -n "$session" && "$session" != "$previous_session" ]] || fail "CamBar did not start"
+
+if jq -e --arg s "$session" 'select(.session_id == $s and
+    (.event | test("^(menu_open_requested|menu_did_show|window_open_requested)$")))' "$LOG" >/dev/null; then
+  pkill -KILL -f "$EXECUTABLE"
+  fail "CamBar opened UI without a click and was stopped"
 fi
-echo "Installed $APP"
-echo "Not launched. Run Scripts/presentation_canary.sh as a separate explicit launch check."
+
+echo "Installed and restarted $APP ($(git rev-parse --short HEAD))."
+if [[ -n "$first_frame" ]]; then
+  echo "Live video after ${first_frame} ms."
+else
+  echo "WARNING: no video within 15 s. Last stream event:"
+  jq -r --arg s "$session" 'select(.session_id == $s and .component == "stream") | "\(.event) \(.detail // "")"' "$LOG" | tail -n 1
+fi

@@ -46,10 +46,11 @@ The RTSP client is vendored from IPCamKit 0.3.1 under `Vendor/IPCamKit`. CamBar 
 
 ```bash
 devenv shell
-./Scripts/compile_and_run.sh --test
+swift test
+swift build && .build/debug/CamBar --probe 10
 ```
 
-This stages a signed bundle at `.build/package/CamBar.app`. It does not install, launch or stop a running copy.
+`--probe` runs the real stream and hardware decoder for ten seconds with no UI and prints a JSON summary. It exits 0 if live video is arriving.
 
 ## Configuration
 
@@ -63,15 +64,7 @@ If neither source is available, the popover reports that the camera is unavailab
 
 ## Packaging
 
-`Scripts/package_app.sh` stages and signs the app. To test, stage and install it:
-
-```bash
-./Scripts/compile_and_run.sh --test
-./Scripts/deploy_app.sh
-./Scripts/presentation_canary.sh
-```
-
-Deployment refuses a dirty tree, a stale bundle, a running copy of CamBar, a changed signing identity or a failed safety check. It does not launch the app. The separate canary launches in the background, waits five seconds and stops CamBar if it presents a menu or window without user input. Timing and playback events are stored in a capped 4 MB log under `~/Library/Caches/CamBar/direct/`.
+`Scripts/package_app.sh` builds and signs the app. `Scripts/deploy_app.sh` runs the tests, packages, installs to `~/Applications`, restarts CamBar in the background and checks its log for live video. It refuses uncommitted changes and stops CamBar if it opens any UI without a click. Timing and playback events are stored in a capped 4 MB log under `~/Library/Caches/CamBar/direct/`.
 
 ## Zero to MVP (anonymized prompts)
 

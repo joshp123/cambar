@@ -23,13 +23,31 @@ Purpose: one-stop shop for agents to develop + debug CamBar fast.
 
 ## 60-second bootstrap
 ```bash
-cd /Users/josh/code/macos-cam-app
+cd /Users/josh/code/cambar
 
 devenv shell   # if toolchain not already present
-./Scripts/compile_and_run.sh --test
-./Scripts/deploy_app.sh   # explicit install; never launches or kills CamBar
-./Scripts/presentation_canary.sh   # explicit background launch; kills on unsolicited UI
+swift test
+swift build && .build/debug/CamBar --probe 10   # headless: real RTSP + hardware decode, JSON summary
+./Scripts/deploy_app.sh   # commit first; tests, installs, restarts in background, checks the log
 ```
+
+## Testing without getting in Josh's way
+Josh uses this Mac while agents work. Never open the popover, take screenshots
+or drive the UI unless the change is to presentation code and he has agreed.
+Prefer, in order:
+1. `swift test` for the reducers, parsers and frame policy.
+2. `CamBar --probe [seconds]` for the stream pipeline. It runs the same
+   `CameraStreamController` and VideoToolbox decoder as the app, with no UI and
+   no effect on the running app. Telemetry goes to stderr; stdout is one JSON
+   line with `result` (`live`, `stalled`, `no_video`, `no_camera_configured`),
+   `first_frame_ms`, `fps`, `width`, `height` and `retries`. Exit 0 means live.
+   Use `~/Applications/CamBar.app/Contents/MacOS/CamBar --probe` to test the
+   installed build.
+3. The running app's log, `~/Library/Caches/CamBar/direct/direct-stream-events.jsonl`.
+   Filter by the newest `launch` event's `session_id`. `frame_heartbeat` every
+   5 s means the warm stream is alive; `session_reconnecting` carries the
+   failure reason; `live_view.elapsed_ms` is click-to-live time.
+4. `Scripts/smoke_ui.sh` drives the real popover on screen. Last resort only.
 
 ## Runtime inputs (source of truth)
 RTSP resolution order:
@@ -39,6 +57,8 @@ RTSP resolution order:
 ## Architecture map (read this before edits)
 - `Sources/CamBar/main.swift` + `AppDelegate.swift`
   - app lifecycle, menubar app wiring
+- `Sources/CamBar/HeadlessStreamProbe.swift`
+  - `--probe` mode for agents and diagnosis
 - `Sources/CamBar/ContentView.swift`
   - minimal popover UI
 - `Sources/CamBar/CameraStreamController.swift` + `VideoToolboxDecoder.swift`
@@ -72,10 +92,16 @@ Run in order:
 tailscale status
 tailscale ping -c 1 192.168.1.249
 nc -zv 192.168.1.249 554
-./Scripts/verify_release_safety.sh
+route -n get 192.168.1.249 | rg interface
+.build/debug/CamBar --probe 10
 ```
 
 Interpretation:
+- away from home, the route must use a `utun` interface. If it says `en0`
+  and `nc` reports "Host is down", the local network also uses
+  192.168.1.0/24 and is winning. `josh-nas` advertises `192.168.1.249/32`
+  alongside the /24 for exactly this; check that route is still advertised
+  and approved
 - ping fails -> routing/ACL/subnet-router problem
 - ping ok + port fails -> camera/RTSP path/firewall problem
 - ping ok + port ok + app fails -> CamBar RTSP/decode/presentation logic
@@ -83,7 +109,12 @@ Interpretation:
 ## Travel/remote notes (Tailscale)
 - Subnet router != exit node.
 - CamBar needs reachability to camera `192.168.1.249:554`; exit node not required.
-- Known current topology: `josh-nas` advertises `192.168.1.0/24`.
+- Known current topology: `josh-nas` advertises `192.168.1.0/24` and the
+  camera's `192.168.1.249/32`. The /32 is more specific than any hotel or
+  Airbnb network that also uses 192.168.1.0/24, so macOS sends camera traffic
+  through Tailscale everywhere, including at home (via the NAS).
+- Away from home the warm stream carries the camera bitrate over Tailscale
+  for as long as CamBar runs.
 - Helpful checks:
 ```bash
 tailscale debug prefs | jq '{WantRunning,RouteAll,ExitNodeID,ExitNodeAllowLANAccess}'
@@ -91,12 +122,9 @@ route -n get 192.168.1.249 | rg 'interface|gateway|flags'
 ```
 
 ## Done criteria before handoff
-- `./Scripts/verify_release_safety.sh` passes.
-- The signed bundle is staged and installed without launching it automatically.
-- `./Scripts/presentation_canary.sh` reports no unsolicited presentation.
-- App launches and plays stream in:
-  - menu popover
-  - popout window
+- `swift test` passes and `CamBar --probe` reports `live`.
+- `./Scripts/deploy_app.sh` reports live video and no unsolicited UI.
+- Presentation changes only: Josh confirms the popover and popout.
 - No secret leakage in diffs/log statements.
 - Summary includes root cause, fix, and how it was verified.
 
