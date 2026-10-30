@@ -72,12 +72,6 @@ public enum NativeStreamRetryPolicy {
     }
 }
 
-public enum H264StreamContinuity {
-    public static func isDiscontinuous(packetLoss: UInt16) -> Bool {
-        packetLoss > 0
-    }
-}
-
 public enum AVCCPacketizer {
     public static func packetizeH264Video(_ nalUnits: [Data]) -> Data {
         var data = Data()

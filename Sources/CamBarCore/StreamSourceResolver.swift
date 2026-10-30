@@ -33,29 +33,13 @@ public enum StreamSourceResolver {
         URL(fileURLWithPath: (NSHomeDirectory() as NSString).appendingPathComponent(".config/camsnap/config.yaml"))
     }
 
-    public static func loadRtspOverride() -> String? {
-        if let env = ProcessInfo.processInfo.environment["CAMBAR_RTSP_URL"],
-           !env.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            return env
+    /// `CAMBAR_RTSP_URL` wins; otherwise the first camera in the camsnap config.
+    public static func resolveRtspURL() -> String? {
+        if let override = ProcessInfo.processInfo.environment["CAMBAR_RTSP_URL"],
+           !override.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return override
         }
-        return nil
-    }
-
-    public static func maskRtspURL(_ raw: String) -> String {
-        guard var components = URLComponents(string: raw) else {
-            return raw
-        }
-        if components.password != nil {
-            components.password = "***"
-        }
-        return components.string ?? raw
-    }
-
-    public static func redactRtspCredentials(in data: Data) -> Data {
-        guard let text = String(data: data, encoding: .utf8) else {
-            return data
-        }
-        return Data(redactRtspCredentials(in: text).utf8)
+        return loadCameraConfig(from: defaultConfigURL()).flatMap(buildRtspURL(from:))
     }
 
     public static func redactRtspCredentials(in text: String) -> String {
@@ -131,13 +115,6 @@ public enum StreamSourceResolver {
         let streamPath = camera.stream ?? "Streaming/Channels/101"
         let path = streamPath.hasPrefix("/") ? streamPath : "/\(streamPath)"
         return "\(scheme)://\(userInfo)\(host):\(port)\(path)"
-    }
-
-    public static func makeCacheFolderURL(namespace: String) -> URL {
-        let caches = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)
-            .first ?? URL(fileURLWithPath: NSTemporaryDirectory())
-        return caches.appendingPathComponent("CamBar", isDirectory: true)
-            .appendingPathComponent(namespace, isDirectory: true)
     }
 
     private static func applyConfigEntry(_ line: String, to camera: inout CameraConfig) -> Bool {

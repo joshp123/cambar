@@ -8,11 +8,14 @@ public enum DirectStreamTelemetry {
     private static let sessionID = UUID().uuidString
     private static let buildID = Bundle.main.object(forInfoDictionaryKey: "GitCommit") as? String
     nonisolated(unsafe) private static var sequence = 0
+    nonisolated(unsafe) private static let timestampFormatter = ISO8601DateFormatter()
+    /// Set once at startup by the headless probe so it never mixes its events
+    /// into the running app's log.
+    nonisolated(unsafe) public static var writesToStandardErrorInsteadOfLogFile = false
 
-    public static var logURL: URL {
-        StreamSourceResolver.makeCacheFolderURL(namespace: "direct")
-            .appendingPathComponent("direct-stream-events.jsonl")
-    }
+    public static let logURL = FileManager.default
+        .urls(for: .cachesDirectory, in: .userDomainMask)[0]
+        .appendingPathComponent("CamBar/direct/direct-stream-events.jsonl")
 
     public static func reset() {
         queue.sync {
@@ -40,15 +43,16 @@ public enum DirectStreamTelemetry {
         if let videoSessionID { message += " video_session_id=\(videoSessionID)" }
         if let elapsedMilliseconds { message += " elapsed_ms=\(elapsedMilliseconds)" }
         if let safeDetail { message += " detail=\(safeDetail)" }
-        logger.info("\(message, privacy: .public)")
+        if !writesToStandardErrorInsteadOfLogFile {
+            logger.info("\(message, privacy: .public)")
+        }
 
         queue.async {
-            prepareLogFile()
             sequence += 1
             var fields: [String: Any] = [
                 "schema_version": 2,
                 "sequence": sequence,
-                "time": ISO8601DateFormatter().string(from: occurredAt),
+                "time": timestampFormatter.string(from: occurredAt),
                 "uptime_ms": occurredUptimeMilliseconds,
                 "session_id": sessionID,
                 "component": component,
@@ -82,6 +86,11 @@ public enum DirectStreamTelemetry {
                   let lineData = line.data(using: .utf8) else {
                 return
             }
+            if writesToStandardErrorInsteadOfLogFile {
+                FileHandle.standardError.write(lineData)
+                return
+            }
+            prepareLogFile()
             if FileManager.default.fileExists(atPath: logURL.path),
                let handle = try? FileHandle(forWritingTo: logURL) {
                 handle.seekToEndOfFile()

@@ -4,13 +4,7 @@ import SwiftUI
 @MainActor
 @Observable
 final class CamBarUIState {
-    enum Status: Equatable {
-        case connecting
-        case ready
-        case unavailable
-    }
-
-    var status: Status = .connecting
+    var cameraUnavailable = false
     var videoSize: CGSize
 
     init(videoSize: CGSize) {
@@ -34,12 +28,7 @@ struct ContentView: View {
                 .frame(width: state.videoSize.width, height: state.videoSize.height)
                 .padding(Self.contentInset)
 
-            if state.status == .connecting {
-                ProgressView()
-                    .controlSize(.small)
-                    .padding(10)
-                    .background(.regularMaterial, in: Capsule())
-            } else if state.status == .unavailable {
+            if state.cameraUnavailable {
                 Button("Camera unavailable — retry", action: onRetry)
                     .buttonStyle(.borderedProminent)
             }

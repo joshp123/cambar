@@ -7,7 +7,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     private let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
     private let popover = NSPopover()
     private let loginItemController = LoginItemController()
-    private lazy var streamController = CameraStreamController(sourceURL: resolvedRTSPURL() ?? "")
+    private lazy var streamController = CameraStreamController(
+        sourceURL: StreamSourceResolver.resolveRtspURL() ?? ""
+    )
     private lazy var playbackController = CameraPlaybackController(
         stream: streamController,
         surface: .menu,
@@ -191,12 +193,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
 
     private func streamStateDidChange(_ state: CameraStreamController.State) {
         switch state {
-        case .ready:
-            uiState.status = .ready
         case .waitingToRetry, .stopped, .suspended:
-            uiState.status = .unavailable
-        case .connecting:
-            uiState.status = .connecting
+            uiState.cameraUnavailable = true
+        case .connecting, .ready:
+            uiState.cameraUnavailable = false
         }
     }
 
@@ -472,15 +472,5 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     private struct OpenIntent {
         let id: String
         let startedAt: TimeInterval
-    }
-
-    private func resolvedRTSPURL() -> String? {
-        if let override = StreamSourceResolver.loadRtspOverride() {
-            return override
-        }
-        guard let config = StreamSourceResolver.loadCameraConfig(
-            from: StreamSourceResolver.defaultConfigURL()
-        ) else { return nil }
-        return StreamSourceResolver.buildRtspURL(from: config)
     }
 }

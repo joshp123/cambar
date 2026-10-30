@@ -157,9 +157,7 @@ final class CameraPlaybackController {
             guard frame.sequence > baseline else { return }
             tryPresentOpeningFrame()
         } else {
-            if !container.present(frame) {
-                recoverRenderer(after: frame)
-            }
+            container.present(frame)
         }
     }
 
@@ -360,7 +358,7 @@ final class CameraVideoContainerView: NSView {
     private let cover = NSView()
     private let progressIndicator = NSProgressIndicator()
     private let loadingLabel = NSTextField(labelWithString: "Connecting…")
-    private var cornerStyle: CameraVideoCornerStyle
+    private let cornerStyle: CameraVideoCornerStyle
     private var indicatorTask: Task<Void, Never>?
 
     init(surface: String, cornerStyle: CameraVideoCornerStyle) {
@@ -423,19 +421,8 @@ final class CameraVideoContainerView: NSView {
         )
     }
 
-    func setCornerStyle(_ style: CameraVideoCornerStyle) {
-        guard style != cornerStyle else { return }
-        cornerStyle = style
-        invalidateCornerConfiguration()
-    }
-
-    @discardableResult
-    func present(_ frame: CameraFrame) -> Bool {
-        pixelBufferView.present(frame)
-    }
-
-    func clearFrame() {
-        pixelBufferView.clear()
+    func present(_ frame: CameraFrame) {
+        pixelBufferView.offer(frame)
     }
 
     func beginSurfaceAttempt(_ attemptID: UInt64) {
@@ -553,11 +540,6 @@ private final class CameraPixelBufferView: NSView {
     @available(*, unavailable)
     required init?(coder: NSCoder) { nil }
 
-    func present(_ frame: CameraFrame) -> Bool {
-        offer(frame)
-        return true
-    }
-
     func shutdown() {
         drainID &+= 1
         drainTask?.cancel()
@@ -569,8 +551,6 @@ private final class CameraPixelBufferView: NSView {
         }
         onDisplayReadinessLost = nil
     }
-
-    func clear() {}
 
     func beginSurfaceAttempt(_ attemptID: UInt64) {
         currentSurfaceAttemptID = max(currentSurfaceAttemptID, attemptID)
@@ -671,7 +651,7 @@ private final class CameraPixelBufferView: NSView {
         let presentationDelay: TimeInterval
     }
 
-    private func offer(_ frame: CameraFrame) {
+    func offer(_ frame: CameraFrame) {
         cadenceReceived += 1
         recordSourceCadence(frame)
         if drainTask != nil {

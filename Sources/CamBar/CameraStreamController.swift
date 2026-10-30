@@ -272,11 +272,11 @@ private actor CameraStreamWorker {
     private var skipNextBackoff = false
     private var activeSession: RTSPClientSession?
     private var decoder: VideoToolboxDecoder?
+    private var decodedFramesTask: Task<Void, Never>?
     private var watchdogTask: Task<Void, Never>?
     private var backoffTask: Task<Void, Never>?
     private var activeGeneration: String?
     private var generationStartedAt: TimeInterval?
-    private var lastEncodedAt: TimeInterval?
     private var lastDecodedAt: TimeInterval?
     private var lastHeartbeatAt: TimeInterval?
     private var decodedFrameCount: UInt64 = 0
@@ -396,7 +396,6 @@ private actor CameraStreamWorker {
         }
         activeGeneration = generation
         generationStartedAt = ProcessInfo.processInfo.systemUptime
-        lastEncodedAt = nil
         lastDecodedAt = nil
         lastHeartbeatAt = generationStartedAt
         decodedFrameCount = 0
@@ -456,9 +455,8 @@ private actor CameraStreamWorker {
             guard case let .video(frame) = item else { continue }
             recordEncodedFrame(timestamp: frame.timestamp)
 
-            if H264StreamContinuity.isDiscontinuous(packetLoss: frame.loss) {
-                decoder?.invalidate()
-                decoder = nil
+            if frame.loss > 0 {
+                discardDecoder()
                 awaitingKeyframe = true
                 DirectStreamTelemetry.record(
                     component: "decoder",
@@ -473,8 +471,7 @@ private actor CameraStreamWorker {
                currentSPS != sps || currentPPS != pps {
                 currentSPS = sps
                 currentPPS = pps
-                decoder?.invalidate()
-                decoder = nil
+                discardDecoder()
                 awaitingKeyframe = true
                 DirectStreamTelemetry.record(
                     component: "decoder",
@@ -503,8 +500,7 @@ private actor CameraStreamWorker {
                     videoSessionID: generation,
                     detail: "error=\(error)"
                 )
-                decoder?.invalidate()
-                decoder = nil
+                discardDecoder()
                 awaitingKeyframe = true
             }
         }
@@ -517,13 +513,14 @@ private actor CameraStreamWorker {
     }
 
     private func createDecoder(generation: String, sps: Data, pps: Data) throws {
+        // VideoToolbox emits frames in order on its own thread; one stream per
+        // decoder carries them into the actor without reordering them.
+        let (decodedFrames, continuation) = AsyncStream.makeStream(of: DecodedCameraFrame.self)
         let decoder = try VideoToolboxDecoder(
             generation: generation,
             sps: sps,
             pps: pps,
-            onFrame: { [weak self] frame in
-                Task { await self?.receiveDecoded(frame) }
-            },
+            onFrame: { continuation.yield($0) },
             onError: { [weak self] status in
                 Task {
                     await self?.decodeCallbackFailed(status, generation: generation)
@@ -531,12 +528,24 @@ private actor CameraStreamWorker {
             }
         )
         self.decoder = decoder
+        decodedFramesTask = Task { [weak self] in
+            for await frame in decodedFrames {
+                await self?.receiveDecoded(frame)
+            }
+        }
         DirectStreamTelemetry.record(
             component: "decoder",
             event: "started",
             videoSessionID: generation,
             detail: "codec=h264 hardware=\(decoder.usesHardwareDecoder) pixel_format=nv12"
         )
+    }
+
+    private func discardDecoder() {
+        decoder?.invalidate()
+        decoder = nil
+        decodedFramesTask?.cancel()
+        decodedFramesTask = nil
     }
 
     private func decodeCallbackFailed(_ status: OSStatus, generation: String) async {
@@ -639,7 +648,6 @@ private actor CameraStreamWorker {
 
     private func recordEncodedFrame(timestamp: TimeInterval) {
         let now = ProcessInfo.processInfo.systemUptime
-        lastEncodedAt = now
         encodedFrameCount += 1
         if let previousEncodedTimestamp, let previousEncodedAt {
             let presentationDelta = timestamp - previousEncodedTimestamp
@@ -673,8 +681,7 @@ private actor CameraStreamWorker {
     private func stopGeneration(reason: String) async {
         watchdogTask?.cancel()
         watchdogTask = nil
-        decoder?.invalidate()
-        decoder = nil
+        discardDecoder()
         if let activeSession {
             await activeSession.abort()
         }
@@ -689,7 +696,6 @@ private actor CameraStreamWorker {
         }
         activeGeneration = nil
         generationStartedAt = nil
-        lastEncodedAt = nil
         lastDecodedAt = nil
     }
 

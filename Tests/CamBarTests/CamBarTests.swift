@@ -186,14 +186,6 @@ final class CamBarTests: XCTestCase {
         XCTAssertEqual(state.phase, .opening)
     }
 
-    func testMaskRtspURLHidesPassword() {
-        let raw = "rtsp://admin:secret@192.168.1.249:554/Streaming/Channels/101"
-
-        let masked = StreamSourceResolver.maskRtspURL(raw)
-
-        XCTAssertEqual(masked, "rtsp://admin:***@192.168.1.249:554/Streaming/Channels/101")
-    }
-
     func testRedactRtspCredentialsInLogText() {
         let log = "Input #0, rtsp, from 'rtsp://admin:secret@192.168.1.249:554/Streaming/Channels/101':"
 
@@ -418,11 +410,6 @@ final class CamBarTests: XCTestCase {
         XCTAssertEqual(NativeStreamRetryPolicy.delay(afterFailure: 2), 0.5)
         XCTAssertEqual(NativeStreamRetryPolicy.delay(afterFailure: 3), 2)
         XCTAssertEqual(NativeStreamRetryPolicy.delay(afterFailure: 20), 5)
-    }
-
-    func testH264PacketLossForcesDiscontinuityRecovery() {
-        XCTAssertFalse(H264StreamContinuity.isDiscontinuous(packetLoss: 0))
-        XCTAssertTrue(H264StreamContinuity.isDiscontinuous(packetLoss: 1))
     }
 
     func testAVCCPacketizerRestoresLengthPrefixesExactlyOnce() {
