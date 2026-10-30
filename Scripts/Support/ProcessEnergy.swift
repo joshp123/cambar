@@ -1,6 +1,8 @@
 import Darwin
 import Foundation
-// Usage: energy <seconds> <pid>...   prints average milliwatts per pid from the kernel's energy counter.
+// Average power and CPU per process from the kernel's energy counter, no sudo:
+// swiftc -O Scripts/Support/ProcessEnergy.swift -o /tmp/process-energy && /tmp/process-energy 60 <pid>...
+// Root processes, such as Tailscale's network extension, are unreadable.
 let seconds = Double(CommandLine.arguments[1])!
 let pids = CommandLine.arguments.dropFirst(2).compactMap { Int32($0) }
 func read(_ pid: Int32) -> (UInt64, UInt64)? {
