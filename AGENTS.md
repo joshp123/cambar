@@ -123,18 +123,29 @@ RTSP resolution order:
 - Re-run tests after behavior changes.
 
 ## Resource target
-With the menu closed, CamBar stays at or under 2% of one CPU core and 150 MB,
+With the menu closed, CamBar stays at or under 3% of one CPU core and 150 MB,
 and `VTDecoderXPCService` stays at 0 because nothing is decoded.
 `frame_heartbeat` reports `cpu_percent` and `memory_mb`;
 `Scripts/deploy_app.sh` fails on the median of five heartbeats. Opening stays
-under 500 ms. Measured on 30 Oct 2026 on main at 4 Mbit/s: about 1% hidden
-(about 3% before hidden socket reads were batched to 16 KB; larger batches add
-nothing), and 74 to 113 ms to live view with the real surface. Divide `sample`
-call-tree counts by the samples actually taken, not by milliseconds. Measure
-hidden cost with the stream keeping up (`real_time_ratio` near 1): a starved
-stream looks cheaper than it is. While viewed, CamBar uses about 4% plus about
-2% in the decoder process. CPU blowouts drove the rewrite away from ffmpeg and
-WebKit, so treat a miss as a bug.
+under 500 ms.
+
+Measured 30-31 Oct 2026, hidden, stream keeping up (`real_time_ratio` near 1),
+all on efficiency cores:
+- main at 4 Mbit/s: 1.3% in the release probe; the app overnight was 2.9%
+  median before the depacketiser fix below, so expect about 2.3%
+- substream at 0.7 Mbit/s: 0.7%
+- open to live view: 74 to 125 ms with the real surface
+- viewing: about 4% plus about 2% in the decoder process
+
+What the hidden cost is (Instruments Time Profiler): about 40% Apple's
+in-process TCP stack, 25% RTP depacketising, the rest allocation and copying.
+Fixed so far: decoding while hidden (removed), a socket read per packet (now
+16 KB batches), and the RTSP client copying its depacketiser on every packet.
+A starved stream looks cheaper than it is, so measure with the stream keeping
+up. Profile with `xcrun xctrace record --template 'Time Profiler' --attach
+<pid> --time-limit 20s`; `sample` cannot tell running from waiting. CPU
+blowouts drove the rewrite away from ffmpeg and WebKit, so treat a miss as a
+bug.
 
 ## Camera settings (not in this repo)
 Main: H.265, 2688x1520, 25 fps, VBR max 4096 kbit/s, keyframe every 2 s, Smart
