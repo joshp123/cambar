@@ -190,6 +190,11 @@ public final class RTSPClientSession: Sendable {
   public func abort() async {
     await state.abort()
   }
+
+  /// See `RTSPTransportConnection.setMinimumReadBytes`.
+  public func setMinimumReadBytes(_ bytes: Int) async {
+    await state.setMinimumReadBytes(bytes)
+  }
 }
 
 /// A decoded frame (video, audio, or metadata) exposed to consumers.
@@ -1160,6 +1165,10 @@ actor SessionState {
   }
 
   /// Fault-path shutdown: close first and never wait for a peer response.
+  func setMinimumReadBytes(_ bytes: Int) async {
+    await connection?.setMinimumReadBytes(bytes)
+  }
+
   func abort() async {
     isPlaying = false
     keepaliveTask?.cancel()

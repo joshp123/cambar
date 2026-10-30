@@ -44,6 +44,14 @@ actor RTSPTransportConnection {
   /// Bytes read from the socket so far; reported with framing errors.
   private(set) var bytesReceived = 0
 
+  /// Smallest read to wake for. Raising it batches packets, trading a little
+  /// latency for far fewer wakeups while no one needs the stream immediately.
+  private var minimumReadBytes = 1
+
+  func setMinimumReadBytes(_ bytes: Int) {
+    minimumReadBytes = bytes
+  }
+
   /// One-shot guard so the connect continuation resumes exactly once across the
   /// state handler and the timeout. Both run on the serial `queue`, so plain
   /// access is race-free (hence `@unchecked Sendable`).
@@ -237,7 +245,7 @@ actor RTSPTransportConnection {
     }
 
     return try await withCheckedThrowingContinuation { continuation in
-      conn.receive(minimumIncompleteLength: 1, maximumLength: 65536) {
+      conn.receive(minimumIncompleteLength: minimumReadBytes, maximumLength: 65536) {
         content, _, isComplete, error in
         if let error = error {
           continuation.resume(

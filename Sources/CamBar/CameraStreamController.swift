@@ -518,7 +518,7 @@ private actor CameraStreamWorker {
         await activeSession?.abort()
     }
 
-    func setViewed(_ viewed: Bool, commandID: UInt64) {
+    func setViewed(_ viewed: Bool, commandID: UInt64) async {
         guard commandID > latestViewingCommandID else { return }
         latestViewingCommandID = commandID
         guard viewed != isViewed else { return }
@@ -529,9 +529,16 @@ private actor CameraStreamWorker {
             videoSessionID: activeGeneration,
             detail: "cached_frames=\(framesSinceKeyframe.count)"
         )
+        await activeSession?.setMinimumReadBytes(minimumReadBytes)
         guard viewed else { return }
         lastDecodedAt = ProcessInfo.processInfo.systemUptime
         decodeCachedFrames()
+    }
+
+    /// Hidden, batch socket reads: waking for every packet is the main cost of
+    /// receiving, and nobody needs the newest few milliseconds.
+    private var minimumReadBytes: Int {
+        isViewed ? 1 : 16_384
     }
 
     /// Runs the decoder through the cached frames, showing only the newest.
@@ -654,6 +661,7 @@ private actor CameraStreamWorker {
         startWatchdog(generation: generation)
         let description = try await session.start()
         guard let video = description.video else { throw StreamFailure.videoMissing }
+        await session.setMinimumReadBytes(minimumReadBytes)
         DirectStreamTelemetry.record(
             component: "rtsp",
             event: "connected",

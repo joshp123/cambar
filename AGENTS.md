@@ -73,7 +73,7 @@ CamBar needs 27.
    - `frame_heartbeat` every 5 s: `stream` (`main` or `fallback`),
      `real_time_ratio` (video seconds received per wall second), `seconds_behind`
      (cumulative slip this session; 3 triggers fallback), `cpu_percent`, `memory_mb`, `encoded_kbps`, frame counts.
-     Main needs about 3 Mbit/s and the substream under 1 Mbit/s.
+     Main needs about 4 Mbit/s and the substream under 1 Mbit/s.
    - `stream_switched`: a move between main and the substream, with the reason.
    - `live_view.elapsed_ms`: click-to-live time.
 4. `Scripts/ui_probe.sh` for presentation code. It runs the real popover
@@ -127,15 +127,20 @@ With the menu closed, CamBar stays at or under 2% of one CPU core and 150 MB,
 and `VTDecoderXPCService` stays at 0 because nothing is decoded.
 `frame_heartbeat` reports `cpu_percent` and `memory_mb`;
 `Scripts/deploy_app.sh` fails on the median of five heartbeats. Opening stays
-under 500 ms. Measured on 30 Oct 2026 on main over a slow link: about 1% hidden,
-74 to 105 ms to live view with the real surface. The remaining hidden cost is
-receiving and depacketising (spread thinly; no hot function in `sample`). While
-viewed, CamBar uses about 4% plus about 2% in the decoder process. CPU blowouts
-drove the rewrite away from ffmpeg and WebKit, so treat a miss as a bug.
+under 500 ms. Measured on 30 Oct 2026 on main at 4 Mbit/s: about 1% hidden
+(about 3% before hidden socket reads were batched to 16 KB; larger batches add
+nothing), and 74 to 113 ms to live view with the real surface. Divide `sample`
+call-tree counts by the samples actually taken, not by milliseconds. Measure
+hidden cost with the stream keeping up (`real_time_ratio` near 1): a starved
+stream looks cheaper than it is. While viewed, CamBar uses about 4% plus about
+2% in the decoder process. CPU blowouts drove the rewrite away from ffmpeg and
+WebKit, so treat a miss as a bug.
 
 ## Camera settings (not in this repo)
-Main: H.265, 2688x1520, 25 fps, VBR max 3072 kbit/s, keyframe every 2 s, Smart
-Codec off. Sub: H.265, 1280x720, 25 fps, VBR max 1024 kbit/s, keyframe every
+Main: H.265, 2688x1520, 25 fps, VBR max 4096 kbit/s, keyframe every 2 s, Smart
+Codec off. 4096 was chosen by SSIM and PSNR against a reference: it beats the old
+H.264 at 6144 in every region, and 3072 did not (`ssh mac-mini
+'~/cambar-quality/compare'` reruns the comparison). Sub: H.265, 1280x720, 25 fps, VBR max 1024 kbit/s, keyframe every
 2 s. Keep Smart Codec off: it stretches keyframe spacing and slows first frame.
 
 ## Fast failure classification
