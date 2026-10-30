@@ -81,10 +81,10 @@ PLIST
 
 xattr -cr "$STAGED_APP"
 if [[ -z "$APP_IDENTITY" ]]; then
-  APP_IDENTITY=$(security find-identity -v -p codesigning 2>/dev/null | awk -F'"' '/Developer ID Application:/ { print $2; exit }')
+  APP_IDENTITY=$(security find-identity -v -p codesigning 2>/dev/null | awk -F'"' '/Apple Development:/ { print $2; exit }')
 fi
 if [[ -z "$APP_IDENTITY" ]]; then
-  echo "ERROR: Developer ID Application signing identity not found; refusing an unstable ad-hoc build." >&2
+  echo "ERROR: Apple Development signing identity not found; refusing an unstable ad-hoc build." >&2
   exit 1
 fi
 SIGN_ARGS=(--force --options runtime --sign "$APP_IDENTITY")
