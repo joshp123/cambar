@@ -57,9 +57,8 @@ fi
 echo "Live video after ${first_frame} ms."
 
 # Resource target with the menu closed (Josh: never "ownzone" the CPU again):
-# at most 5% of one core and 150 MB in CamBar itself. Use the median of five
-# heartbeats, skipping the first: catch-up bursts briefly decode faster than
-# real time and are not a steady cost.
+# at most 2% of one core and 150 MB. Hidden, nothing is decoded, so this is the
+# whole cost. Use the median of five heartbeats, skipping the first.
 heartbeats=""
 for _ in {1..40}; do
   sleep 1
@@ -72,5 +71,5 @@ median() { sort -n | awk '{ v[NR] = $1 } END { print v[int((NR + 1) / 2)] }'; }
 cpu=$(sed -E 's/.*cpu_percent=([0-9.]+).*/\1/' <<<"$heartbeats" | median)
 memory=$(sed -E 's/.*memory_mb=([0-9]+).*/\1/' <<<"$heartbeats" | median)
 echo "Warm stream: ${cpu}% CPU, ${memory} MB (median of $(wc -l <<<"$heartbeats" | tr -d ' ') heartbeats)."
-awk -v c="$cpu" -v m="$memory" 'BEGIN { exit !(c <= 5 && m <= 150) }' \
-  || fail "resource target missed: ${cpu}% CPU (max 5), ${memory} MB (max 150)"
+awk -v c="$cpu" -v m="$memory" 'BEGIN { exit !(c <= 2 && m <= 150) }' \
+  || fail "resource target missed: ${cpu}% CPU (max 2), ${memory} MB (max 150)"

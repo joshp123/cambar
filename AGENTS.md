@@ -123,14 +123,15 @@ RTSP resolution order:
 - Re-run tests after behavior changes.
 
 ## Resource target
-With the menu closed, CamBar itself stays at or under 5% of one CPU core and
-150 MB. `frame_heartbeat` reports `cpu_percent` and `memory_mb`;
-`Scripts/deploy_app.sh` fails on the median of five heartbeats. Measured on
-30 Oct 2026: about 2.4% on the substream and 3.8% on main at full rate, with
-no hot function in `sample`; the cost is per-frame wakeups. The system's
-`VTDecoderXPCService` adds about 2% that CamBar's number does not include.
-Catch-up bursts after a stall can briefly reach about 7%. CPU blowouts drove
-the rewrite away from ffmpeg and WebKit, so treat a miss as a bug.
+With the menu closed, CamBar stays at or under 2% of one CPU core and 150 MB,
+and `VTDecoderXPCService` stays at 0 because nothing is decoded.
+`frame_heartbeat` reports `cpu_percent` and `memory_mb`;
+`Scripts/deploy_app.sh` fails on the median of five heartbeats. Opening stays
+under 500 ms. Measured on 30 Oct 2026 on main over a slow link: about 1% hidden,
+74 to 105 ms to live view with the real surface. The remaining hidden cost is
+receiving and depacketising (spread thinly; no hot function in `sample`). While
+viewed, CamBar uses about 4% plus about 2% in the decoder process. CPU blowouts
+drove the rewrite away from ffmpeg and WebKit, so treat a miss as a bug.
 
 ## Camera settings (not in this repo)
 Main: H.265, 2688x1520, 25 fps, VBR max 3072 kbit/s, keyframe every 2 s, Smart
