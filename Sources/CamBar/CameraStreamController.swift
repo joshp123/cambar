@@ -119,10 +119,31 @@ final class CameraStreamController {
             }
         }
         networkMonitor.pathUpdateHandler = { [weak self] path in
-            let summary = "status=\(path.status) interfaces=\(Array(Set(path.availableInterfaces.map(\.name))).sorted().joined(separator: ","))"
+            let names = Array(Set(path.availableInterfaces.map(\.name))).sorted()
+            let summary = "status=\(path.status) interfaces=\(names.map(CameraStreamController.describeInterface).joined(separator: ","))"
             MainActor.assumeIsolated { self?.networkChanged(summary) }
         }
         networkMonitor.start(queue: .main)
+    }
+
+    /// `en0=192.168.1.20/24`: an interface with its IPv4 addresses, so a log
+    /// shows when the local network overlaps the camera's.
+    nonisolated static func describeInterface(_ name: String) -> String {
+        var addresses: [String] = []
+        var head: UnsafeMutablePointer<ifaddrs>?
+        guard getifaddrs(&head) == 0 else { return name }
+        defer { freeifaddrs(head) }
+        var cursor = head
+        while let entry = cursor?.pointee {
+            defer { cursor = entry.ifa_next }
+            guard String(cString: entry.ifa_name) == name,
+                  let address = entry.ifa_addr, address.pointee.sa_family == UInt8(AF_INET),
+                  let netmask = entry.ifa_netmask else { continue }
+            let ip = address.withMemoryRebound(to: sockaddr_in.self, capacity: 1) { $0.pointee.sin_addr }
+            let mask = netmask.withMemoryRebound(to: sockaddr_in.self, capacity: 1) { $0.pointee.sin_addr.s_addr }
+            addresses.append("\(String(cString: inet_ntoa(ip)))/\(mask.nonzeroBitCount)")
+        }
+        return addresses.isEmpty ? name : "\(name)=\(addresses.joined(separator: "+"))"
     }
 
     /// Log every network change; if the camera is not streaming, retry now
