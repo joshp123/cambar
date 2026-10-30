@@ -17,6 +17,9 @@ Purpose: one-stop shop for agents to develop + debug CamBar fast.
 - Pipeline: RTSP camera → IPCamKit → hardware VideoToolbox decode → native video surface.
 - Stream policy:
   - the main stream `/Streaming/Channels/101` is warmed at launch/login
+  - one stream runs at a time; when main delivers under 0.8 s of video per
+    second for two 5 s windows, or fails three times running, CamBar falls back
+    to the substream `/102` and tries main again after 5 minutes
   - retain only the newest decoded frame; never accumulate a playback queue
   - normal playback must not use go2rtc, WebKit, ffmpeg, HLS files or AVPlayer
   - old fallback playback paths should be deleted, not preserved
@@ -57,8 +60,11 @@ Look at raw evidence and reason from it; do not build bespoke assertions.
    - `session_stopped`: the real failure, with `[interface=… local=…]` for
      connection failures, plus duration, frame and byte counts and
      `last_packet_age_ms`. Framing errors include the next raw bytes.
-   - `frame_heartbeat` every 5 s: `encoded_kbps` received and frame counts.
-     The main stream needs about 5 Mbit/s; lower means the link is the limit.
+   - `frame_heartbeat` every 5 s: `stream` (`main` or `fallback`),
+     `real_time_ratio` (video seconds received per wall second; under 1 means
+     falling behind), `cpu_percent`, `memory_mb`, `encoded_kbps`, frame counts.
+     Main needs about 3 Mbit/s and the substream under 1 Mbit/s.
+   - `stream_switched`: a move between main and the substream, with the reason.
    - `live_view.elapsed_ms`: click-to-live time.
 4. `Scripts/smoke_ui.sh` drives the real popover on screen. Last resort only.
 
@@ -75,7 +81,7 @@ RTSP resolution order:
 - `Sources/CamBar/ContentView.swift`
   - minimal popover UI
 - `Sources/CamBar/CameraStreamController.swift` + `VideoToolboxDecoder.swift`
-  - one app-lifetime RTSP session, hardware H.264 decode, latest-frame cache and reconnect supervision
+  - one app-lifetime RTSP session, hardware H.264/H.265 decode, latest-frame cache, reconnect supervision and main/substream fallback
 - `Sources/CamBar/CameraPlaybackController.swift` + `CameraVideoView.swift`
   - fixed native menu and popout surfaces; the surfaces are never reparented and never own the stream
 - `Sources/CamBarCore/PopoverPresentationState.swift`
@@ -98,6 +104,18 @@ RTSP resolution order:
 - Fix root cause first; avoid workaround layering.
 - Never commit camera creds or unmasked RTSP URLs.
 - Re-run tests after behavior changes.
+
+## Resource target
+With the menu closed, the warm stream stays at or under 3% of one CPU core and
+150 MB. `frame_heartbeat` reports `cpu_percent` and `memory_mb`;
+`Scripts/deploy_app.sh` fails if the target is missed. CPU blowouts drove the
+rewrite away from ffmpeg and WebKit, so treat a miss as a bug. Short catch-up
+bursts after a stall can reach about 7%.
+
+## Camera settings (not in this repo)
+Main: H.265, 2688x1520, 25 fps, VBR max 3072 kbit/s, keyframe every 2 s, Smart
+Codec off. Sub: H.265, 1280x720, 25 fps, VBR max 1024 kbit/s, keyframe every
+2 s. Keep Smart Codec off: it stretches keyframe spacing and slows first frame.
 
 ## Fast failure classification
 Run in order:

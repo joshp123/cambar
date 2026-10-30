@@ -21,7 +21,7 @@ written_by: ai
 
 ## What it does
 
-CamBar reads your RTSP URL from `CAMBAR_RTSP_URL` or `~/.config/camsnap/config.yaml`. At launch it opens one RTSP session, decodes H.264 with VideoToolbox and retains only the newest decoded frame. Opening either camera surface presents that current frame and then the advancing stream. There is no transcoding, browser process, local HTTP server, disk segment cache or duplicate camera connection.
+CamBar reads your RTSP URL from `CAMBAR_RTSP_URL` or `~/.config/camsnap/config.yaml`. At launch it opens one RTSP session, decodes H.264 or H.265 with VideoToolbox and retains only the newest decoded frame. If the link cannot carry the main stream, it falls back to the camera's substream and tries main again later. Opening either camera surface presents that current frame and then the advancing stream. There is no transcoding, browser process, local HTTP server, disk segment cache or duplicate camera connection.
 
 ## Why
 
