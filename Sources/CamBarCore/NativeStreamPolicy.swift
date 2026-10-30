@@ -74,14 +74,37 @@ public enum NativeStreamRetryPolicy {
 }
 
 public enum NativeStreamFallbackPolicy {
-    /// Main is falling behind when it delivers less video time than this per
-    /// second of wall time...
-    public static let minimumRealTimeRatio = 0.8
-    /// ...for this many consecutive 5-second heartbeats.
-    public static let slowWindowsBeforeFallback = 2
-    /// Consecutive main-stream failures that also mean the link is too weak.
+    /// Showing video this stale is worse than showing less detail.
+    public static let maximumSecondsBehind: TimeInterval = 3
+    /// Consecutive failures that also mean the link is too weak for main.
     public static let mainFailuresBeforeFallback = 3
     public static let retryMainAfter: TimeInterval = 300
+}
+
+/// How far a session has slipped behind real time: wall time passed minus
+/// video time received. It is measured from the session's best moment because
+/// the starting offset is unknown, and it is cumulative because window-to-window
+/// jitter cancels out while a real shortage adds up. Camera and Mac clocks
+/// differ by a few parts per million, which the allowance absorbs on streams
+/// that stay warm for days.
+public struct RealTimeLagTracker: Sendable {
+    private static let clockDriftAllowance = 0.0001
+
+    private var wallSeconds = 0.0
+    private var lag = 0.0
+    private var minimumLag = 0.0
+
+    public init() {}
+
+    public mutating func add(wallSeconds wall: TimeInterval, mediaSeconds: TimeInterval) {
+        wallSeconds += wall
+        lag += wall - mediaSeconds
+        minimumLag = min(minimumLag, lag)
+    }
+
+    public var secondsBehind: TimeInterval {
+        max(0, lag - minimumLag - wallSeconds * Self.clockDriftAllowance)
+    }
 }
 
 /// Process CPU time and memory footprint, sampled for the heartbeat.

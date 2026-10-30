@@ -148,14 +148,16 @@ final class CameraStreamController {
         return addresses.isEmpty ? name : "\(name)=\(addresses.joined(separator: "+"))"
     }
 
-    /// Log every network change; if the camera is not streaming, retry now
-    /// instead of waiting out the backoff (joining Wi-Fi, Tailscale coming up).
+    /// Log every network change. Retry now if the camera is not streaming, and
+    /// give main another chance if the link forced the substream.
     private func networkChanged(_ summary: String) {
         guard summary != networkSummary else { return }
         let isFirstReport = networkSummary == nil
         networkSummary = summary
         DirectStreamTelemetry.record(component: "network", event: "network_changed", detail: summary)
-        if !isFirstReport, supervisorTask != nil, state != .ready {
+        guard !isFirstReport, supervisorTask != nil else { return }
+        Task { await worker.networkChanged() }
+        if state != .ready {
             retryNow()
         }
     }
@@ -317,7 +319,7 @@ private actor CameraStreamWorker {
     private var fallbackSince: TimeInterval?
     private var activeGenerationIsFallback = false
     private var pendingStreamSwitch: String?
-    private var slowWindowCount = 0
+    private var lagTracker = RealTimeLagTracker()
     private var mediaSecondsSinceHeartbeat = 0.0
     private var heartbeatsSinceFirstFrame = 0
     private var resourceSampleAtHeartbeat = ProcessResourceUsage.sample()
@@ -447,6 +449,9 @@ private actor CameraStreamWorker {
         latestLifecycleCommandID = commandID
         desiredRunning = running
         backoffTask?.cancel()
+        if running {
+            fallbackSince = nil  // Waking often means a different network.
+        }
         if !running {
             DirectStreamTelemetry.record(component: "stream", event: "sleep_suspended")
             await activeSession?.abort()
@@ -464,6 +469,15 @@ private actor CameraStreamWorker {
         await activeSession?.abort()
     }
 
+    /// A new network may carry main again (arriving home, leaving a bad hotel).
+    func networkChanged() async {
+        guard fallbackSince != nil else { return }
+        fallbackSince = nil
+        guard activeGenerationIsFallback, activeSession != nil else { return }
+        pendingStreamSwitch = "network changed"
+        await activeSession?.abort()
+    }
+
     func shutdown() async {
         permanentlyStopped = true
         desiredRunning = false
@@ -473,6 +487,11 @@ private actor CameraStreamWorker {
     }
 
     private func runGeneration(_ generation: String) async throws {
+        // Checked here too: a fallback that never decodes has no heartbeats.
+        if let fallbackSince,
+           ProcessInfo.processInfo.systemUptime - fallbackSince >= NativeStreamFallbackPolicy.retryMainAfter {
+            self.fallbackSince = nil
+        }
         activeGenerationIsFallback = fallbackSince != nil
         let sourceURL = activeGenerationIsFallback ? fallbackSourceURL ?? mainSourceURL : mainSourceURL
         guard let source = Self.resolveSource(sourceURL) else {
@@ -492,7 +511,7 @@ private actor CameraStreamWorker {
         previousEncodedAt = nil
         resetEncodedCadenceWindow()
         firstFrameEmitted = false
-        slowWindowCount = 0
+        lagTracker = RealTimeLagTracker()
         mediaSecondsSinceHeartbeat = 0
         heartbeatsSinceFirstFrame = 0
 
@@ -682,7 +701,6 @@ private actor CameraStreamWorker {
         )
         if !firstFrameEmitted {
             firstFrameEmitted = true
-            failureCount = 0
             DirectStreamTelemetry.record(
                 component: "video",
                 event: "first_frame",
@@ -743,7 +761,9 @@ private actor CameraStreamWorker {
                 : 0
             // Video time received per second of wall time. Below 1 the stream
             // is falling behind real time, so what is shown gets staler.
-            let realTimeRatio = mediaSecondsSinceHeartbeat / (now - lastHeartbeatAt)
+            let heartbeatWallSeconds = now - lastHeartbeatAt
+            let heartbeatMediaSeconds = mediaSecondsSinceHeartbeat
+            let realTimeRatio = heartbeatMediaSeconds / heartbeatWallSeconds
             let resources = ProcessResourceUsage.sample()
             let cpuPercent = resources.cpuPercent(since: resourceSampleAtHeartbeat)
             resourceSampleAtHeartbeat = resources
@@ -752,7 +772,7 @@ private actor CameraStreamWorker {
                 event: "frame_heartbeat",
                 videoSessionID: generation,
                 elapsedMilliseconds: frameAge,
-                detail: "stream=\(activeGenerationIsFallback ? "fallback" : "main") real_time_ratio=\(String(format: "%.2f", realTimeRatio)) cpu_percent=\(String(format: "%.1f", cpuPercent)) memory_mb=\(resources.memoryMegabytes) encoded_kbps=\(encodedKilobitsPerSecond) decoded_frames=\(decodedFrameCount) decoded_interval=\(decodedSinceHeartbeat) encoded_frames=\(encodedFrameCount) encoded_interval=\(encodedSinceHeartbeat) encoded_jitter_avg_ms=\(String(format: "%.2f", averageEncodedJitter)) encoded_jitter_max_ms=\(String(format: "%.2f", encodedJitterMaximumMilliseconds)) encoded_gap_max_ms=\(String(format: "%.2f", encodedGapMaximumMilliseconds))"
+                detail: "stream=\(activeGenerationIsFallback ? "fallback" : "main") real_time_ratio=\(String(format: "%.2f", realTimeRatio)) seconds_behind=\(String(format: "%.2f", lagTracker.secondsBehind)) cpu_percent=\(String(format: "%.1f", cpuPercent)) memory_mb=\(resources.memoryMegabytes) encoded_kbps=\(encodedKilobitsPerSecond) decoded_frames=\(decodedFrameCount) decoded_interval=\(decodedSinceHeartbeat) encoded_frames=\(encodedFrameCount) encoded_interval=\(encodedSinceHeartbeat) encoded_jitter_avg_ms=\(String(format: "%.2f", averageEncodedJitter)) encoded_jitter_max_ms=\(String(format: "%.2f", encodedJitterMaximumMilliseconds)) encoded_gap_max_ms=\(String(format: "%.2f", encodedGapMaximumMilliseconds))"
             )
             self.lastHeartbeatAt = now
             decodedAtLastHeartbeat = decodedFrameCount
@@ -762,7 +782,14 @@ private actor CameraStreamWorker {
             resetEncodedCadenceWindow()
             if firstFrameEmitted {
                 heartbeatsSinceFirstFrame += 1
-                if let reason = streamSwitchReason(realTimeRatio: realTimeRatio, now: now) {
+                // The first window after the first frame includes setup time.
+                if heartbeatsSinceFirstFrame > 1 {
+                    lagTracker.add(wallSeconds: heartbeatWallSeconds, mediaSeconds: heartbeatMediaSeconds)
+                    if lagTracker.secondsBehind < 1 {
+                        failureCount = 0  // A session that keeps up has proved itself.
+                    }
+                }
+                if let reason = streamSwitchReason(now: now) {
                     pendingStreamSwitch = reason
                     await activeSession?.abort()
                     return true
@@ -774,20 +801,17 @@ private actor CameraStreamWorker {
 
     /// Fall back when main cannot keep up; try main again after a while.
     /// Uses only timings already recorded per frame, so it costs nothing.
-    private func streamSwitchReason(realTimeRatio: Double, now: TimeInterval) -> String? {
+    private func streamSwitchReason(now: TimeInterval) -> String? {
         if let fallbackSince {
             guard now - fallbackSince >= NativeStreamFallbackPolicy.retryMainAfter else { return nil }
             self.fallbackSince = nil
             return "retrying main after \(Int(NativeStreamFallbackPolicy.retryMainAfter)) s"
         }
-        // The first window after the first frame includes catch-up bursts.
-        guard fallbackSourceURL != nil, heartbeatsSinceFirstFrame > 1 else { return nil }
-        slowWindowCount = realTimeRatio < NativeStreamFallbackPolicy.minimumRealTimeRatio
-            ? slowWindowCount + 1
-            : 0
-        guard slowWindowCount >= NativeStreamFallbackPolicy.slowWindowsBeforeFallback else { return nil }
+        let secondsBehind = lagTracker.secondsBehind
+        guard fallbackSourceURL != nil,
+              secondsBehind >= NativeStreamFallbackPolicy.maximumSecondsBehind else { return nil }
         fallbackSince = now
-        return "main falling behind real time (ratio \(String(format: "%.2f", realTimeRatio)))"
+        return "main \(String(format: "%.1f", secondsBehind)) s behind real time"
     }
 
     private func recordEncodedFrame(timestamp: TimeInterval) {

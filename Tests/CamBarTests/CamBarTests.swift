@@ -435,6 +435,39 @@ final class CamBarTests: XCTestCase {
         XCTAssertEqual(packet, Data([0, 0, 0, 2, 0x65, 0x05]))
     }
 
+    func testLagTrackerAccumulatesASmallSustainedShortage() {
+        var tracker = RealTimeLagTracker()
+        for _ in 0..<6 {  // 30 s at 90% of real time
+            tracker.add(wallSeconds: 5, mediaSeconds: 4.5)
+        }
+        XCTAssertEqual(tracker.secondsBehind, 3, accuracy: 0.01)
+    }
+
+    func testLagTrackerIgnoresJitterOnAHealthyStream() {
+        var tracker = RealTimeLagTracker()
+        for window in 0..<10_000 {  // Frames landing either side of a boundary.
+            tracker.add(wallSeconds: 5, mediaSeconds: window.isMultiple(of: 2) ? 4.7 : 5.3)
+        }
+        XCTAssertLessThan(tracker.secondsBehind, 0.5)
+    }
+
+    func testLagTrackerRecoversWhenABacklogDrains() {
+        var tracker = RealTimeLagTracker()
+        tracker.add(wallSeconds: 5, mediaSeconds: 3)
+        XCTAssertEqual(tracker.secondsBehind, 2, accuracy: 0.01)
+        tracker.add(wallSeconds: 5, mediaSeconds: 7)
+        XCTAssertEqual(tracker.secondsBehind, 0, accuracy: 0.01)
+    }
+
+    func testLagTrackerAbsorbsClockDriftOnAWeekLongStream() {
+        var tracker = RealTimeLagTracker()
+        let windowsInAWeek = 7 * 24 * 720
+        for _ in 0..<windowsInAWeek {  // Camera clock 50 ppm slow.
+            tracker.add(wallSeconds: 5, mediaSeconds: 5 * 0.99995)
+        }
+        XCTAssertEqual(tracker.secondsBehind, 0, accuracy: 0.01)
+    }
+
     func testFallbackIsTheHikvisionSubstreamOfTheMainStream() {
         XCTAssertEqual(
             StreamSourceResolver.fallbackRtspURL(forMain: "rtsp://u:p@cam:554/Streaming/Channels/101"),

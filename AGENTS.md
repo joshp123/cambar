@@ -17,9 +17,9 @@ Purpose: one-stop shop for agents to develop + debug CamBar fast.
 - Pipeline: RTSP camera → IPCamKit → hardware VideoToolbox decode → native video surface.
 - Stream policy:
   - the main stream `/Streaming/Channels/101` is warmed at launch/login
-  - one stream runs at a time; when main delivers under 0.8 s of video per
-    second for two 5 s windows, or fails three times running, CamBar falls back
-    to the substream `/102` and tries main again after 5 minutes
+  - one stream runs at a time; when main slips 3 s behind real time, or fails
+    three times running, CamBar falls back to the substream `/102`. It tries
+    main again after 5 minutes, on wake and on any network change
   - retain only the newest decoded frame; never accumulate a playback queue
   - normal playback must not use go2rtc, WebKit, ffmpeg, HLS files or AVPlayer
   - old fallback playback paths should be deleted, not preserved
@@ -61,8 +61,8 @@ Look at raw evidence and reason from it; do not build bespoke assertions.
      connection failures, plus duration, frame and byte counts and
      `last_packet_age_ms`. Framing errors include the next raw bytes.
    - `frame_heartbeat` every 5 s: `stream` (`main` or `fallback`),
-     `real_time_ratio` (video seconds received per wall second; under 1 means
-     falling behind), `cpu_percent`, `memory_mb`, `encoded_kbps`, frame counts.
+     `real_time_ratio` (video seconds received per wall second), `seconds_behind`
+     (cumulative slip this session; 3 triggers fallback), `cpu_percent`, `memory_mb`, `encoded_kbps`, frame counts.
      Main needs about 3 Mbit/s and the substream under 1 Mbit/s.
    - `stream_switched`: a move between main and the substream, with the reason.
    - `live_view.elapsed_ms`: click-to-live time.
