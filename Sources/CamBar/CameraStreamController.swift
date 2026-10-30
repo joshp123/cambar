@@ -357,6 +357,8 @@ private actor CameraStreamWorker {
     /// Compressed frames since the last keyframe: everything a decoder needs
     /// to produce the newest picture, bounded by the camera's keyframe spacing.
     private var framesSinceKeyframe: [PublicVideoFrame] = []
+    /// When a usable frame last joined the cache: a hidden session's progress.
+    private var lastCachedAt: TimeInterval?
     private var pendingCatchUp: (startedAt: TimeInterval, newestTimestamp: TimeInterval, frames: Int)?
     private var mediaSecondsSinceHeartbeat = 0.0
     private var heartbeatsSinceFirstFrame = 0
@@ -535,6 +537,23 @@ private actor CameraStreamWorker {
     /// Runs the decoder through the cached frames, showing only the newest.
     private func decodeCachedFrames() {
         guard let decoder, !awaitingKeyframe else { return }
+        guard NativeFrameFreshness.canReplayCachedFrames(
+            now: ProcessInfo.processInfo.systemUptime,
+            lastReceivedAt: previousEncodedAt
+        ) else {
+            // Reception has stalled, so the cache is old. Wait for live frames;
+            // the open deadline and watchdog reconnect if none come.
+            DirectStreamTelemetry.record(
+                component: "stream",
+                event: "stale_cache_discarded",
+                videoSessionID: activeGeneration,
+                detail: "cached_frames=\(framesSinceKeyframe.count)"
+            )
+            discardDecoder()
+            awaitingKeyframe = true
+            framesSinceKeyframe = []
+            return
+        }
         let cached = framesSinceKeyframe
         if let newest = cached.last {
             pendingCatchUp = (ProcessInfo.processInfo.systemUptime, newest.timestamp, cached.count)
@@ -598,6 +617,8 @@ private actor CameraStreamWorker {
         lagTracker = RealTimeLagTracker()
         awaitingKeyframe = true
         framesSinceKeyframe = []
+        lastCachedAt = nil
+        pendingCatchUp = nil
         mediaSecondsSinceHeartbeat = 0
         heartbeatsSinceFirstFrame = 0
 
@@ -695,6 +716,19 @@ private actor CameraStreamWorker {
             } else {
                 framesSinceKeyframe.append(frame)
             }
+            guard framesSinceKeyframe.count <= NativeFrameFreshness.maximumCachedFrames else {
+                DirectStreamTelemetry.record(
+                    component: "stream",
+                    event: "keyframes_stopped",
+                    videoSessionID: generation,
+                    detail: "cached_frames=\(framesSinceKeyframe.count)"
+                )
+                discardDecoder()
+                awaitingKeyframe = true
+                framesSinceKeyframe = []
+                continue
+            }
+            lastCachedAt = ProcessInfo.processInfo.systemUptime
             // Decode the first picture hidden too: it proves the decoder works
             // and is what marks the stream ready.
             guard isViewed || !firstFrameEmitted else { continue }
@@ -846,8 +880,8 @@ private actor CameraStreamWorker {
             return true
         }
         let now = ProcessInfo.processInfo.systemUptime
-        // Hidden sessions decode nothing, so arriving data is their progress.
-        let lastProgress = isViewed || !firstFrameEmitted ? lastDecodedAt : previousEncodedAt
+        // Hidden sessions decode nothing: progress is a usable frame in the cache.
+        let lastProgress = isViewed || !firstFrameEmitted ? lastDecodedAt : lastCachedAt
         let progressAt = lastProgress ?? generationStartedAt ?? now
         if now - progressAt >= 5 {
             DirectStreamTelemetry.record(

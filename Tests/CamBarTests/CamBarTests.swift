@@ -435,6 +435,12 @@ final class CamBarTests: XCTestCase {
         XCTAssertEqual(packet, Data([0, 0, 0, 2, 0x65, 0x05]))
     }
 
+    func testCachedFramesAreOnlyReplayedWhileReceptionIsCurrent() {
+        XCTAssertTrue(NativeFrameFreshness.canReplayCachedFrames(now: 10, lastReceivedAt: 9.5))
+        XCTAssertFalse(NativeFrameFreshness.canReplayCachedFrames(now: 10, lastReceivedAt: 8.9))
+        XCTAssertFalse(NativeFrameFreshness.canReplayCachedFrames(now: 10, lastReceivedAt: nil))
+    }
+
     func testLagTrackerAccumulatesASmallSustainedShortage() {
         var tracker = RealTimeLagTracker()
         for _ in 0..<6 {  // 30 s at 90% of real time

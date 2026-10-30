@@ -3,6 +3,17 @@ import Foundation
 
 public enum NativeFrameFreshness {
     public static let maximumCachedAge: TimeInterval = 0.1
+    /// Replaying compressed frames this long after the last one arrived would
+    /// show old video as if it were live.
+    public static let maximumReplayGap: TimeInterval = 1
+    /// The longest keyframe spacing the camera allows. A cache this big means
+    /// keyframes have stopped arriving.
+    public static let maximumCachedFrames = 400
+
+    public static func canReplayCachedFrames(now: TimeInterval, lastReceivedAt: TimeInterval?) -> Bool {
+        guard let lastReceivedAt else { return false }
+        return now - lastReceivedAt <= maximumReplayGap
+    }
 
     public static func canPresentCachedFrame(
         now: TimeInterval,
