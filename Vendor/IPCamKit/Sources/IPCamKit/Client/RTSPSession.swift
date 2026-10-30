@@ -1015,11 +1015,13 @@ actor SessionState {
     streamIndex: Int, data: Data,
     continuation: AsyncThrowingStream<PublicCodecItem, Error>.Continuation
   ) throws {
-    guard var parser = inorderParsers[streamIndex] else { return }
+    // Move state out rather than copy it: a copy leaves a second reference,
+    // so every append inside would copy the buffers (copy-on-write).
+    guard var parser = inorderParsers.removeValue(forKey: streamIndex) else { return }
     defer { inorderParsers[streamIndex] = parser }
 
     if let videoIdx = videoStreamIndex, streamIndex == videoIdx {
-      guard var depkt = depacketizer else { return }
+      guard var depkt = depacketizer.take() else { return }
       defer { depacketizer = depkt }
       guard
         let pkt = try parser.rtp(
