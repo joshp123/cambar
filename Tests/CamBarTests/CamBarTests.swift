@@ -413,11 +413,11 @@ final class CamBarTests: XCTestCase {
     }
 
     func testAVCCPacketizerRestoresLengthPrefixesExactlyOnce() {
-        let packet = AVCCPacketizer.packetizeH264Video([
+        let packet = AVCCPacketizer.packetize([
             Data([0x65, 0xAA, 0xBB]),
             Data(),
             Data([0x41, 0xCC]),
-        ])
+        ], codec: .h264)
         XCTAssertEqual(packet, Data([
             0, 0, 0, 3, 0x65, 0xAA, 0xBB,
             0, 0, 0, 2, 0x41, 0xCC,
@@ -425,13 +425,38 @@ final class CamBarTests: XCTestCase {
     }
 
     func testAVCCPacketizerDropsNonPictureH264NALUnits() {
-        let packet = AVCCPacketizer.packetizeH264Video([
+        let packet = AVCCPacketizer.packetize([
             Data([0x06, 0x01]),
             Data([0x67, 0x02]),
             Data([0x68, 0x03]),
             Data([0x09, 0x04]),
             Data([0x65, 0x05]),
-        ])
+        ], codec: .h264)
         XCTAssertEqual(packet, Data([0, 0, 0, 2, 0x65, 0x05]))
+    }
+
+    func testFallbackIsTheHikvisionSubstreamOfTheMainStream() {
+        XCTAssertEqual(
+            StreamSourceResolver.fallbackRtspURL(forMain: "rtsp://u:p@cam:554/Streaming/Channels/101"),
+            "rtsp://u:p@cam:554/Streaming/Channels/102"
+        )
+        XCTAssertNil(StreamSourceResolver.fallbackRtspURL(forMain: "rtsp://cam/Streaming/Channels/102"))
+        XCTAssertNil(StreamSourceResolver.fallbackRtspURL(forMain: "rtsp://cam/live"))
+    }
+
+    func testAVCCPacketizerDropsH265ParameterSetsAndKeepsSlices() {
+        // NAL type is bits 1-6 of the first header byte.
+        let packet = AVCCPacketizer.packetize([
+            Data([32 << 1, 0x01, 0xAA]),  // VPS
+            Data([33 << 1, 0x01, 0xBB]),  // SPS
+            Data([34 << 1, 0x01, 0xCC]),  // PPS
+            Data([39 << 1, 0x01, 0xDD]),  // prefix SEI
+            Data([19 << 1, 0x01, 0xEE]),  // IDR slice
+            Data([1 << 1, 0x01, 0xFF]),   // trailing slice
+        ], codec: .h265)
+        XCTAssertEqual(packet, Data([
+            0, 0, 0, 3, 19 << 1, 0x01, 0xEE,
+            0, 0, 0, 3, 1 << 1, 0x01, 0xFF,
+        ]))
     }
 }

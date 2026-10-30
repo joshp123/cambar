@@ -12,6 +12,24 @@ struct DecodedCameraFrame: @unchecked Sendable {
     let decodedAt: TimeInterval
 }
 
+/// The out-of-band parameter sets a decoder session is built from.
+enum VideoParameterSets: Equatable, Sendable {
+    case h264(sps: Data, pps: Data)
+    case h265(vps: Data, sps: Data, pps: Data)
+
+    var vps: Data? {
+        if case let .h265(vps, _, _) = self { return vps }
+        return nil
+    }
+
+    var codec: VideoCodecKind {
+        switch self {
+        case .h264: .h264
+        case .h265: .h265
+        }
+    }
+}
+
 final class VideoToolboxDecoder: @unchecked Sendable {
     enum DecoderError: Error, CustomStringConvertible {
         case invalidParameterSets
@@ -38,6 +56,7 @@ final class VideoToolboxDecoder: @unchecked Sendable {
     }
 
     let usesHardwareDecoder: Bool
+    let codec: VideoCodecKind
 
     private let callbackContext: CallbackContext
     private let callbackContextPointer: UnsafeMutableRawPointer
@@ -48,14 +67,11 @@ final class VideoToolboxDecoder: @unchecked Sendable {
 
     init(
         generation: String,
-        sps: Data,
-        pps: Data,
+        parameterSets: VideoParameterSets,
         onFrame: @escaping @Sendable (DecodedCameraFrame) -> Void,
         onError: @escaping @Sendable (OSStatus) -> Void
     ) throws {
-        guard !sps.isEmpty, !pps.isEmpty else {
-            throw DecoderError.invalidParameterSets
-        }
+        codec = parameterSets.codec
 
         let context = CallbackContext(
             generation: generation,
@@ -66,7 +82,7 @@ final class VideoToolboxDecoder: @unchecked Sendable {
         callbackContextPointer = Unmanaged.passRetained(context).toOpaque()
 
         do {
-            let format = try Self.makeFormatDescription(sps: sps, pps: pps)
+            let format = try Self.makeFormatDescription(parameterSets)
             formatDescription = format
 
             let decoderSpecification: [String: Any] = [
@@ -136,7 +152,7 @@ final class VideoToolboxDecoder: @unchecked Sendable {
     }
 
     func decode(_ frame: PublicVideoFrame) throws {
-        let compressed = AVCCPacketizer.packetizeH264Video(frame.nalus)
+        let compressed = AVCCPacketizer.packetize(frame.nalus, codec: codec)
         guard !compressed.isEmpty else { return }
 
         lock.lock()
@@ -237,27 +253,46 @@ final class VideoToolboxDecoder: @unchecked Sendable {
     }
 
     private static func makeFormatDescription(
-        sps: Data,
-        pps: Data
+        _ parameterSets: VideoParameterSets
     ) throws -> CMVideoFormatDescription {
+        let sets: [Data] = switch parameterSets {
+        case let .h264(sps, pps): [sps, pps]
+        case let .h265(vps, sps, pps): [vps, sps, pps]
+        }
+        guard sets.allSatisfy({ !$0.isEmpty }) else {
+            throw DecoderError.invalidParameterSets
+        }
+        // VideoToolbox needs every parameter set alive for the whole call.
+        let copies = sets.map { data -> UnsafeMutableBufferPointer<UInt8> in
+            let copy = UnsafeMutableBufferPointer<UInt8>.allocate(capacity: data.count)
+            _ = copy.initialize(from: data)
+            return copy
+        }
+        defer { copies.forEach { $0.deallocate() } }
+        var pointers = copies.map { UnsafePointer($0.baseAddress!) }
+        var sizes = copies.map(\.count)
+
         var description: CMVideoFormatDescription?
-        let status = sps.withUnsafeBytes { spsBytes in
-            pps.withUnsafeBytes { ppsBytes in
-                guard let spsBase = spsBytes.bindMemory(to: UInt8.self).baseAddress,
-                      let ppsBase = ppsBytes.bindMemory(to: UInt8.self).baseAddress else {
-                    return kCMFormatDescriptionError_InvalidParameter
-                }
-                var pointers: [UnsafePointer<UInt8>] = [spsBase, ppsBase]
-                var sizes = [sps.count, pps.count]
-                return CMVideoFormatDescriptionCreateFromH264ParameterSets(
-                    allocator: kCFAllocatorDefault,
-                    parameterSetCount: pointers.count,
-                    parameterSetPointers: &pointers,
-                    parameterSetSizes: &sizes,
-                    nalUnitHeaderLength: 4,
-                    formatDescriptionOut: &description
-                )
-            }
+        let status = switch parameterSets {
+        case .h264:
+            CMVideoFormatDescriptionCreateFromH264ParameterSets(
+                allocator: kCFAllocatorDefault,
+                parameterSetCount: pointers.count,
+                parameterSetPointers: &pointers,
+                parameterSetSizes: &sizes,
+                nalUnitHeaderLength: 4,
+                formatDescriptionOut: &description
+            )
+        case .h265:
+            CMVideoFormatDescriptionCreateFromHEVCParameterSets(
+                allocator: kCFAllocatorDefault,
+                parameterSetCount: pointers.count,
+                parameterSetPointers: &pointers,
+                parameterSetSizes: &sizes,
+                nalUnitHeaderLength: 4,
+                extensions: nil,
+                formatDescriptionOut: &description
+            )
         }
         guard status == noErr, let description else {
             throw DecoderError.formatDescription(status)

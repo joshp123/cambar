@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 
 public enum NativeFrameFreshness {
@@ -72,13 +73,70 @@ public enum NativeStreamRetryPolicy {
     }
 }
 
+public enum NativeStreamFallbackPolicy {
+    /// Main is falling behind when it delivers less video time than this per
+    /// second of wall time...
+    public static let minimumRealTimeRatio = 0.8
+    /// ...for this many consecutive 5-second heartbeats.
+    public static let slowWindowsBeforeFallback = 2
+    /// Consecutive main-stream failures that also mean the link is too weak.
+    public static let mainFailuresBeforeFallback = 3
+    public static let retryMainAfter: TimeInterval = 300
+}
+
+/// Process CPU time and memory footprint, sampled for the heartbeat.
+public struct ProcessResourceUsage: Sendable {
+    public let uptime: TimeInterval
+    public let cpuSeconds: TimeInterval
+    public let memoryMegabytes: Int
+
+    public static func sample() -> ProcessResourceUsage {
+        var usage = rusage()
+        getrusage(RUSAGE_SELF, &usage)
+        let cpuSeconds = TimeInterval(usage.ru_utime.tv_sec + usage.ru_stime.tv_sec)
+            + TimeInterval(usage.ru_utime.tv_usec + usage.ru_stime.tv_usec) / 1_000_000
+        var info = task_vm_info_data_t()
+        var count = mach_msg_type_number_t(
+            MemoryLayout<task_vm_info_data_t>.size / MemoryLayout<natural_t>.size
+        )
+        let status = withUnsafeMutablePointer(to: &info) {
+            $0.withMemoryRebound(to: integer_t.self, capacity: Int(count)) {
+                task_info(mach_task_self_, task_flavor_t(TASK_VM_INFO), $0, &count)
+            }
+        }
+        return ProcessResourceUsage(
+            uptime: ProcessInfo.processInfo.systemUptime,
+            cpuSeconds: cpuSeconds,
+            memoryMegabytes: status == KERN_SUCCESS ? Int(info.phys_footprint / 1_048_576) : -1
+        )
+    }
+
+    /// Percent of one core used since `earlier`.
+    public func cpuPercent(since earlier: ProcessResourceUsage) -> Double {
+        let wall = uptime - earlier.uptime
+        return wall > 0 ? (cpuSeconds - earlier.cpuSeconds) / wall * 100 : 0
+    }
+}
+
+public enum VideoCodecKind: String, Sendable {
+    case h264
+    case h265
+}
+
 public enum AVCCPacketizer {
-    public static func packetizeH264Video(_ nalUnits: [Data]) -> Data {
+    /// Length-prefixes picture NAL units for VideoToolbox, dropping parameter
+    /// sets, access-unit delimiters and SEI, which travel out of band.
+    public static func packetize(_ nalUnits: [Data], codec: VideoCodecKind) -> Data {
         var data = Data()
         data.reserveCapacity(nalUnits.reduce(0) { $0 + ($1.isEmpty ? 0 : 4 + $1.count) })
         for nalUnit in nalUnits where !nalUnit.isEmpty {
-            let type = nalUnit[nalUnit.startIndex] & 0x1F
-            guard !(6...9).contains(type) else { continue }
+            let header = nalUnit[nalUnit.startIndex]
+            switch codec {
+            case .h264:
+                guard !(6...9).contains(header & 0x1F) else { continue }
+            case .h265:
+                guard ![32, 33, 34, 35, 39, 40].contains((header >> 1) & 0x3F) else { continue }
+            }
             var length = UInt32(nalUnit.count).bigEndian
             withUnsafeBytes(of: &length) { data.append(contentsOf: $0) }
             data.append(nalUnit)

@@ -42,6 +42,21 @@ public enum StreamSourceResolver {
         return loadCameraConfig(from: defaultConfigURL()).flatMap(buildRtspURL(from:))
     }
 
+    /// Hikvision numbers streams N01 (main) and N02 (sub). The substream is
+    /// the fallback when the main stream cannot keep up with the link.
+    public static func fallbackRtspURL(forMain mainURL: String) -> String? {
+        guard let range = mainURL.range(
+            of: #"/Streaming/Channels/\d*01$"#,
+            options: [.regularExpression, .caseInsensitive]
+        ) else { return nil }
+        var fallback = mainURL
+        fallback.replaceSubrange(
+            mainURL.index(range.upperBound, offsetBy: -2)..<range.upperBound,
+            with: "02"
+        )
+        return fallback
+    }
+
     public static func redactRtspCredentials(in text: String) -> String {
         let pattern = #"rtsp://([^:\s/@]+):([^@\s]+)@"#
         guard let regex = try? NSRegularExpression(pattern: pattern) else {

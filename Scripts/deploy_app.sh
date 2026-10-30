@@ -55,3 +55,20 @@ if [[ -z "$first_frame" ]]; then
   exit 1
 fi
 echo "Live video after ${first_frame} ms."
+
+# Resource target with the menu closed (Josh: never "ownzone" the CPU again):
+# at most 3% of one core and 150 MB. The second heartbeat after the first
+# frame excludes startup.
+heartbeat=""
+for _ in {1..30}; do
+  sleep 1
+  heartbeat=$(jq -r --arg s "$session" \
+    'select(.session_id == $s and .event == "frame_heartbeat") | .detail' "$LOG" | sed -n 2p)
+  [[ -n "$heartbeat" ]] && break
+done
+[[ -n "$heartbeat" ]] || fail "no frame heartbeat to measure resources"
+cpu=$(sed -E 's/.*cpu_percent=([0-9.]+).*/\1/' <<<"$heartbeat")
+memory=$(sed -E 's/.*memory_mb=([0-9]+).*/\1/' <<<"$heartbeat")
+echo "Warm stream: ${cpu}% CPU, ${memory} MB ($(sed -E 's/.*(stream=[a-z]+ real_time_ratio=[0-9.]+).*/\1/' <<<"$heartbeat"))."
+awk -v c="$cpu" -v m="$memory" 'BEGIN { exit !(c <= 3 && m <= 150) }' \
+  || fail "resource target missed: ${cpu}% CPU (max 3), ${memory} MB (max 150)"

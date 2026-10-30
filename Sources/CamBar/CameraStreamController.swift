@@ -7,6 +7,7 @@ import Network
 
 struct CameraFrame: @unchecked Sendable {
     let generation: String
+    let isFallbackStream: Bool
     let sequence: UInt64
     let pixelBuffer: CVPixelBuffer
     let presentationTime: CMTime
@@ -108,7 +109,8 @@ final class CameraStreamController {
         let eventBridge = CameraStreamEventBridge()
         self.eventBridge = eventBridge
         worker = CameraStreamWorker(
-            sourceURL: sourceURL,
+            mainSourceURL: sourceURL,
+            fallbackSourceURL: StreamSourceResolver.fallbackRtspURL(forMain: sourceURL),
             onState: { eventBridge.yield($0) },
             onFrame: { eventBridge.yield(frame: $0) }
         )
@@ -268,7 +270,9 @@ final class CameraStreamController {
         guard !isPermanentlyStopped,
               frame.generation == activeGeneration else { return }
         latestFrame = frame
-        if videoSize != frame.size {
+        // Size the surfaces for the main stream; the fallback stream is drawn
+        // into the same frame rather than shrinking the window.
+        if !frame.isFallbackStream, videoSize != frame.size {
             videoSize = frame.size
             onVideoSizeChange?(frame.size)
         }
@@ -300,13 +304,23 @@ private actor CameraStreamWorker {
             switch self {
             case .invalidSource: "invalid RTSP source"
             case .videoMissing: "RTSP session has no video stream"
-            case .unsupportedCodec: "camera stream is not H.264"
+            case .unsupportedCodec: "camera stream is neither H.264 nor H.265"
             case .streamEnded: "RTSP frame stream ended"
             }
         }
     }
 
-    private let sourceURL: String
+    private let mainSourceURL: String
+    private let fallbackSourceURL: String?
+    /// Set while the main stream cannot keep up with the link; cleared to try
+    /// main again after `NativeStreamFallbackPolicy.retryMainAfter`.
+    private var fallbackSince: TimeInterval?
+    private var activeGenerationIsFallback = false
+    private var pendingStreamSwitch: String?
+    private var slowWindowCount = 0
+    private var mediaSecondsSinceHeartbeat = 0.0
+    private var heartbeatsSinceFirstFrame = 0
+    private var resourceSampleAtHeartbeat = ProcessResourceUsage.sample()
     private let onState: @Sendable (CameraStreamEvent) -> Void
     private let onFrame: @Sendable (CameraFrame) -> Void
     private var desiredRunning = false
@@ -340,11 +354,13 @@ private actor CameraStreamWorker {
     private var latestLifecycleCommandID: UInt64 = 0
 
     init(
-        sourceURL: String,
+        mainSourceURL: String,
+        fallbackSourceURL: String?,
         onState: @escaping @Sendable (CameraStreamEvent) -> Void,
         onFrame: @escaping @Sendable (CameraFrame) -> Void
     ) {
-        self.sourceURL = sourceURL
+        self.mainSourceURL = mainSourceURL
+        self.fallbackSourceURL = fallbackSourceURL
         self.onState = onState
         self.onFrame = onFrame
     }
@@ -371,9 +387,31 @@ private actor CameraStreamWorker {
                     throw StreamFailure.streamEnded
                 }
             } catch {
+                if let streamSwitch = pendingStreamSwitch {
+                    pendingStreamSwitch = nil
+                    await stopGeneration(reason: streamSwitch)
+                    DirectStreamTelemetry.record(
+                        component: "stream",
+                        event: "stream_switched",
+                        videoSessionID: generation,
+                        detail: "to=\(fallbackSince == nil ? "main" : "fallback") reason=\(streamSwitch)"
+                    )
+                    failureCount = 0
+                    continue
+                }
                 await stopGeneration(reason: "\(error)")
                 guard desiredRunning, !permanentlyStopped, !Task.isCancelled else { continue }
                 failureCount += 1
+                if fallbackSince == nil, fallbackSourceURL != nil,
+                   failureCount >= NativeStreamFallbackPolicy.mainFailuresBeforeFallback {
+                    fallbackSince = ProcessInfo.processInfo.systemUptime
+                    DirectStreamTelemetry.record(
+                        component: "stream",
+                        event: "stream_switched",
+                        videoSessionID: generation,
+                        detail: "to=fallback reason=main stream failed \(failureCount) times"
+                    )
+                }
                 let delay: TimeInterval
                 if skipNextBackoff {
                     delay = 0
@@ -435,6 +473,8 @@ private actor CameraStreamWorker {
     }
 
     private func runGeneration(_ generation: String) async throws {
+        activeGenerationIsFallback = fallbackSince != nil
+        let sourceURL = activeGenerationIsFallback ? fallbackSourceURL ?? mainSourceURL : mainSourceURL
         guard let source = Self.resolveSource(sourceURL) else {
             throw StreamFailure.invalidSource
         }
@@ -452,6 +492,9 @@ private actor CameraStreamWorker {
         previousEncodedAt = nil
         resetEncodedCadenceWindow()
         firstFrameEmitted = false
+        slowWindowCount = 0
+        mediaSecondsSinceHeartbeat = 0
+        heartbeatsSinceFirstFrame = 0
 
         let transport = rtspTransport
         let transportName = switch transport {
@@ -462,7 +505,7 @@ private actor CameraStreamWorker {
             component: "stream",
             event: "session_started",
             videoSessionID: generation,
-            detail: "transport=\(transportName)"
+            detail: "transport=\(transportName) stream=\(activeGenerationIsFallback ? "fallback" : "main") url=\(StreamSourceResolver.redactRtspCredentials(in: sourceURL))"
         )
         let session = RTSPClientSession(
             url: source.url,
@@ -485,7 +528,6 @@ private actor CameraStreamWorker {
         startWatchdog(generation: generation)
         let description = try await session.start()
         guard let video = description.video else { throw StreamFailure.videoMissing }
-        guard case .h264 = video.codec else { throw StreamFailure.unsupportedCodec }
         DirectStreamTelemetry.record(
             component: "rtsp",
             event: "connected",
@@ -493,8 +535,9 @@ private actor CameraStreamWorker {
             elapsedMilliseconds: elapsedSinceGenerationStart()
         )
 
-        var currentSPS = video.sps
-        var currentPPS = video.pps
+        var parameterSets = Self.parameterSets(
+            codec: video.codec, vps: video.vps, sps: video.sps, pps: video.pps
+        )
         var awaitingKeyframe = true
         for try await item in session.frames() {
             guard desiredRunning, !permanentlyStopped, !Task.isCancelled else { break }
@@ -516,27 +559,28 @@ private actor CameraStreamWorker {
                 continue
             }
 
-            if let sps = frame.sps, let pps = frame.pps,
-               currentSPS != sps || currentPPS != pps {
-                currentSPS = sps
-                currentPPS = pps
-                discardDecoder()
-                awaitingKeyframe = true
-                DirectStreamTelemetry.record(
-                    component: "decoder",
-                    event: "parameter_sets_changed",
-                    videoSessionID: generation
-                )
+            if let updated = Self.parameterSets(
+                codec: video.codec,
+                vps: frame.vps ?? parameterSets?.vps,
+                sps: frame.sps,
+                pps: frame.pps
+            ), updated != parameterSets {
+                if parameterSets != nil {
+                    discardDecoder()
+                    awaitingKeyframe = true
+                    DirectStreamTelemetry.record(
+                        component: "decoder",
+                        event: "parameter_sets_changed",
+                        videoSessionID: generation
+                    )
+                }
+                parameterSets = updated
             }
 
             if awaitingKeyframe {
                 guard frame.isKeyframe else { continue }
-                guard let currentSPS, let currentPPS else { continue }
-                try createDecoder(
-                    generation: generation,
-                    sps: currentSPS,
-                    pps: currentPPS
-                )
+                guard let parameterSets else { continue }
+                try createDecoder(generation: generation, parameterSets: parameterSets)
                 awaitingKeyframe = false
             }
 
@@ -561,7 +605,17 @@ private actor CameraStreamWorker {
             : .tcp
     }
 
-    private func createDecoder(generation: String, sps: Data, pps: Data) throws {
+    private static func parameterSets(
+        codec: VideoCodec, vps: Data?, sps: Data?, pps: Data?
+    ) -> VideoParameterSets? {
+        guard let sps, let pps else { return nil }
+        switch codec {
+        case .h264: return .h264(sps: sps, pps: pps)
+        case .h265: return vps.map { .h265(vps: $0, sps: sps, pps: pps) }
+        }
+    }
+
+    private func createDecoder(generation: String, parameterSets: VideoParameterSets) throws {
         // VideoToolbox emits frames in order on its own thread; one stream per
         // decoder carries them into the actor in order, keeping only the newest
         // if the actor falls behind.
@@ -571,8 +625,7 @@ private actor CameraStreamWorker {
         )
         let decoder = try VideoToolboxDecoder(
             generation: generation,
-            sps: sps,
-            pps: pps,
+            parameterSets: parameterSets,
             onFrame: { continuation.yield($0) },
             onError: { [weak self] status in
                 Task {
@@ -590,7 +643,7 @@ private actor CameraStreamWorker {
             component: "decoder",
             event: "started",
             videoSessionID: generation,
-            detail: "codec=h264 hardware=\(decoder.usesHardwareDecoder) pixel_format=nv12"
+            detail: "codec=\(decoder.codec.rawValue) hardware=\(decoder.usesHardwareDecoder) pixel_format=nv12"
         )
     }
 
@@ -621,6 +674,7 @@ private actor CameraStreamWorker {
         nextFrameSequence += 1
         let frame = CameraFrame(
             generation: decoded.generation,
+            isFallbackStream: activeGenerationIsFallback,
             sequence: nextFrameSequence,
             pixelBuffer: decoded.pixelBuffer,
             presentationTime: decoded.presentationTime,
@@ -687,20 +741,53 @@ private actor CameraStreamWorker {
             let averageEncodedJitter = encodedJitterSamples > 0
                 ? encodedJitterTotalMilliseconds / Double(encodedJitterSamples)
                 : 0
+            // Video time received per second of wall time. Below 1 the stream
+            // is falling behind real time, so what is shown gets staler.
+            let realTimeRatio = mediaSecondsSinceHeartbeat / (now - lastHeartbeatAt)
+            let resources = ProcessResourceUsage.sample()
+            let cpuPercent = resources.cpuPercent(since: resourceSampleAtHeartbeat)
+            resourceSampleAtHeartbeat = resources
             DirectStreamTelemetry.record(
                 component: "video",
                 event: "frame_heartbeat",
                 videoSessionID: generation,
                 elapsedMilliseconds: frameAge,
-                detail: "encoded_kbps=\(encodedKilobitsPerSecond) decoded_frames=\(decodedFrameCount) decoded_interval=\(decodedSinceHeartbeat) encoded_frames=\(encodedFrameCount) encoded_interval=\(encodedSinceHeartbeat) encoded_jitter_avg_ms=\(String(format: "%.2f", averageEncodedJitter)) encoded_jitter_max_ms=\(String(format: "%.2f", encodedJitterMaximumMilliseconds)) encoded_gap_max_ms=\(String(format: "%.2f", encodedGapMaximumMilliseconds))"
+                detail: "stream=\(activeGenerationIsFallback ? "fallback" : "main") real_time_ratio=\(String(format: "%.2f", realTimeRatio)) cpu_percent=\(String(format: "%.1f", cpuPercent)) memory_mb=\(resources.memoryMegabytes) encoded_kbps=\(encodedKilobitsPerSecond) decoded_frames=\(decodedFrameCount) decoded_interval=\(decodedSinceHeartbeat) encoded_frames=\(encodedFrameCount) encoded_interval=\(encodedSinceHeartbeat) encoded_jitter_avg_ms=\(String(format: "%.2f", averageEncodedJitter)) encoded_jitter_max_ms=\(String(format: "%.2f", encodedJitterMaximumMilliseconds)) encoded_gap_max_ms=\(String(format: "%.2f", encodedGapMaximumMilliseconds))"
             )
             self.lastHeartbeatAt = now
             decodedAtLastHeartbeat = decodedFrameCount
             encodedAtLastHeartbeat = encodedFrameCount
             encodedBytesSinceHeartbeat = 0
+            mediaSecondsSinceHeartbeat = 0
             resetEncodedCadenceWindow()
+            if firstFrameEmitted {
+                heartbeatsSinceFirstFrame += 1
+                if let reason = streamSwitchReason(realTimeRatio: realTimeRatio, now: now) {
+                    pendingStreamSwitch = reason
+                    await activeSession?.abort()
+                    return true
+                }
+            }
         }
         return false
+    }
+
+    /// Fall back when main cannot keep up; try main again after a while.
+    /// Uses only timings already recorded per frame, so it costs nothing.
+    private func streamSwitchReason(realTimeRatio: Double, now: TimeInterval) -> String? {
+        if let fallbackSince {
+            guard now - fallbackSince >= NativeStreamFallbackPolicy.retryMainAfter else { return nil }
+            self.fallbackSince = nil
+            return "retrying main after \(Int(NativeStreamFallbackPolicy.retryMainAfter)) s"
+        }
+        // The first window after the first frame includes catch-up bursts.
+        guard fallbackSourceURL != nil, heartbeatsSinceFirstFrame > 1 else { return nil }
+        slowWindowCount = realTimeRatio < NativeStreamFallbackPolicy.minimumRealTimeRatio
+            ? slowWindowCount + 1
+            : 0
+        guard slowWindowCount >= NativeStreamFallbackPolicy.slowWindowsBeforeFallback else { return nil }
+        fallbackSince = now
+        return "main falling behind real time (ratio \(String(format: "%.2f", realTimeRatio)))"
     }
 
     private func recordEncodedFrame(timestamp: TimeInterval) {
@@ -713,6 +800,10 @@ private actor CameraStreamWorker {
                 encodedGapMaximumMilliseconds,
                 arrivalDelta * 1_000
             )
+            if presentationDelta > 0,
+               presentationDelta <= NativeFrameCadence.discontinuityThreshold {
+                mediaSecondsSinceHeartbeat += presentationDelta
+            }
             if presentationDelta > 0,
                presentationDelta <= NativeFrameCadence.maximumFrameDuration {
                 let jitterMilliseconds = abs(arrivalDelta - presentationDelta) * 1_000
