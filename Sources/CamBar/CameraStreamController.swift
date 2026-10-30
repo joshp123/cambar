@@ -119,7 +119,7 @@ final class CameraStreamController {
             }
         }
         networkMonitor.pathUpdateHandler = { [weak self] path in
-            let summary = "status=\(path.status) interfaces=\(path.availableInterfaces.map(\.name).joined(separator: ","))"
+            let summary = "status=\(path.status) interfaces=\(Array(Set(path.availableInterfaces.map(\.name))).sorted().joined(separator: ","))"
             MainActor.assumeIsolated { self?.networkChanged(summary) }
         }
         networkMonitor.start(queue: .main)
