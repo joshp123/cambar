@@ -517,8 +517,12 @@ private actor CameraStreamWorker {
 
     private func createDecoder(generation: String, sps: Data, pps: Data) throws {
         // VideoToolbox emits frames in order on its own thread; one stream per
-        // decoder carries them into the actor without reordering them.
-        let (decodedFrames, continuation) = AsyncStream.makeStream(of: DecodedCameraFrame.self)
+        // decoder carries them into the actor in order, keeping only the newest
+        // if the actor falls behind.
+        let (decodedFrames, continuation) = AsyncStream.makeStream(
+            of: DecodedCameraFrame.self,
+            bufferingPolicy: .bufferingNewest(1)
+        )
         let decoder = try VideoToolboxDecoder(
             generation: generation,
             sps: sps,

@@ -40,7 +40,7 @@ enum HeadlessStreamProbe {
         Task { @MainActor in
             try? await Task.sleep(for: .seconds(seconds))
             let now = ProcessInfo.processInfo.systemUptime
-            let isLive = lastFrameAt.map { now - $0 < 1 } ?? false
+            let isLive = stream.state == .ready && (lastFrameAt.map { now - $0 < 1 } ?? false)
             var summary: [String: Any] = [
                 "result": isLive ? "live" : (frameCount > 0 ? "stalled" : "no_video"),
                 "camera": StreamSourceResolver.redactRtspCredentials(in: sourceURL),

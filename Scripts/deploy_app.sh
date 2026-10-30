@@ -27,14 +27,14 @@ mkdir -p "$APP"
 rsync -a --delete "$ROOT/.build/package/CamBar.app/" "$APP/"
 codesign --verify --deep --strict "$APP"
 
-previous_session=$(jq -r 'select(.event == "launch") | .session_id' "$LOG" 2>/dev/null | tail -n 1)
+previous_session=$(jq -r 'select(.event == "launch") | .session_id' "$LOG" 2>/dev/null | tail -n 1 || true)
 open -gj "$APP"
 
 session=""
 first_frame=""
 for _ in {1..30}; do
   sleep 0.5
-  session=$(jq -r 'select(.event == "launch") | .session_id' "$LOG" 2>/dev/null | tail -n 1)
+  session=$(jq -r 'select(.event == "launch") | .session_id' "$LOG" 2>/dev/null | tail -n 1 || true)
   [[ -n "$session" && "$session" != "$previous_session" ]] || continue
   first_frame=$(jq -r --arg s "$session" \
     'select(.session_id == $s and .event == "first_frame") | .elapsed_ms' "$LOG" | head -n 1)
@@ -49,9 +49,9 @@ if jq -e --arg s "$session" 'select(.session_id == $s and
 fi
 
 echo "Installed and restarted $APP ($(git rev-parse --short HEAD))."
-if [[ -n "$first_frame" ]]; then
-  echo "Live video after ${first_frame} ms."
-else
-  echo "WARNING: no video within 15 s. Last stream event:"
-  jq -r --arg s "$session" 'select(.session_id == $s and .component == "stream") | "\(.event) \(.detail // "")"' "$LOG" | tail -n 1
+if [[ -z "$first_frame" ]]; then
+  echo "ERROR: CamBar is running but showed no video within 15 s. Last stream event:" >&2
+  jq -r --arg s "$session" 'select(.session_id == $s and .component == "stream") | "\(.event) \(.detail // "")"' "$LOG" | tail -n 1 >&2
+  exit 1
 fi
+echo "Live video after ${first_frame} ms."
