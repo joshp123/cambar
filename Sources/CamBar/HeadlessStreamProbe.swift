@@ -1,10 +1,13 @@
 import CamBarCore
+import CoreImage
 import Foundation
 
 /// `CamBar --probe [seconds]` runs the app's real RTSP and hardware-decode
 /// pipeline with no UI, streams telemetry to stderr and prints one JSON
-/// summary to stdout. Exit status 0 means live video was still arriving at
-/// the end of the run. It does not touch the running app or its log.
+/// summary to stdout. It saves the last decoded frame as a PNG so an agent
+/// can look at the picture, including the camera's on-screen clock. Exit
+/// status 0 means live video was still arriving at the end of the run. It
+/// does not touch the running app or its log.
 @MainActor
 enum HeadlessStreamProbe {
     static func run(seconds: TimeInterval) -> Never {
@@ -21,6 +24,7 @@ enum HeadlessStreamProbe {
         var frameCount = 0
         var retryCount = 0
         var videoSize: CGSize?
+        var lastFrame: CameraFrame?
 
         _ = stream.addObserver(
             onFrame: { frame in
@@ -30,6 +34,7 @@ enum HeadlessStreamProbe {
                 lastFrameAt = now
                 frameCount += 1
                 videoSize = frame.size
+                lastFrame = frame
             },
             onState: { state in
                 if case .waitingToRetry = state { retryCount += 1 }
@@ -58,6 +63,24 @@ enum HeadlessStreamProbe {
             if let videoSize {
                 summary["width"] = Int(videoSize.width)
                 summary["height"] = Int(videoSize.height)
+            }
+            if let lastFrame {
+                let frameURL = FileManager.default.temporaryDirectory
+                    .appendingPathComponent("cambar-probe-last-frame.png")
+                let image = CIImage(cvPixelBuffer: lastFrame.pixelBuffer)
+                try? CIContext().writePNGRepresentation(
+                    of: image,
+                    to: frameURL,
+                    format: .RGBA8,
+                    colorSpace: CGColorSpace(name: CGColorSpace.sRGB)!
+                )
+                summary["last_frame_png"] = frameURL.path
+                let localTime = ISO8601DateFormatter()
+                localTime.timeZone = .current
+                localTime.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+                summary["last_frame_decoded_at"] = localTime.string(
+                    from: Date().addingTimeInterval(lastFrame.decodedAt - now)
+                )
             }
             printSummary(summary)
             stream.shutdown()

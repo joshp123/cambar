@@ -3,6 +3,7 @@ import CoreMedia
 import CoreVideo
 import Foundation
 import IPCamKit
+import Network
 
 struct CameraFrame: @unchecked Sendable {
     let generation: String
@@ -100,6 +101,8 @@ final class CameraStreamController {
     private var isPermanentlyStopped = false
     private var lifecycleCommandID: UInt64 = 0
     private var activeGeneration: String?
+    private let networkMonitor = NWPathMonitor()
+    private var networkSummary: String?
 
     init(sourceURL: String) {
         let eventBridge = CameraStreamEventBridge()
@@ -114,6 +117,23 @@ final class CameraStreamController {
                 guard let self else { return }
                 self.receive(event: event)
             }
+        }
+        networkMonitor.pathUpdateHandler = { [weak self] path in
+            let summary = "status=\(path.status) interfaces=\(path.availableInterfaces.map(\.name).joined(separator: ","))"
+            MainActor.assumeIsolated { self?.networkChanged(summary) }
+        }
+        networkMonitor.start(queue: .main)
+    }
+
+    /// Log every network change; if the camera is not streaming, retry now
+    /// instead of waiting out the backoff (joining Wi-Fi, Tailscale coming up).
+    private func networkChanged(_ summary: String) {
+        guard summary != networkSummary else { return }
+        let isFirstReport = networkSummary == nil
+        networkSummary = summary
+        DirectStreamTelemetry.record(component: "network", event: "network_changed", detail: summary)
+        if !isFirstReport, supervisorTask != nil, state != .ready {
+            retryNow()
         }
     }
 
@@ -163,6 +183,7 @@ final class CameraStreamController {
     func shutdown() {
         guard !isPermanentlyStopped else { return }
         isPermanentlyStopped = true
+        networkMonitor.cancel()
         latestFrame = nil
         videoSize = nil
         notifyFrameCleared()
@@ -284,6 +305,7 @@ private actor CameraStreamWorker {
     private var encodedFrameCount: UInt64 = 0
     private var encodedAtLastHeartbeat: UInt64 = 0
     private var encodedBytesSinceHeartbeat = 0
+    private var encodedBytesTotal = 0
     private var previousEncodedTimestamp: TimeInterval?
     private var previousEncodedAt: TimeInterval?
     private var encodedJitterSamples = 0
@@ -328,7 +350,7 @@ private actor CameraStreamWorker {
                     throw StreamFailure.streamEnded
                 }
             } catch {
-                await stopGeneration(reason: "failure")
+                await stopGeneration(reason: "\(error)")
                 guard desiredRunning, !permanentlyStopped, !Task.isCancelled else { continue }
                 failureCount += 1
                 let delay: TimeInterval
@@ -404,6 +426,7 @@ private actor CameraStreamWorker {
         encodedFrameCount = 0
         encodedAtLastHeartbeat = 0
         encodedBytesSinceHeartbeat = 0
+        encodedBytesTotal = 0
         previousEncodedTimestamp = nil
         previousEncodedAt = nil
         resetEncodedCadenceWindow()
@@ -456,7 +479,9 @@ private actor CameraStreamWorker {
             guard desiredRunning, !permanentlyStopped, !Task.isCancelled else { break }
             guard case let .video(frame) = item else { continue }
             recordEncodedFrame(timestamp: frame.timestamp)
-            encodedBytesSinceHeartbeat += frame.nalus.reduce(0) { $0 + $1.count }
+            let frameBytes = frame.nalus.reduce(0) { $0 + $1.count }
+            encodedBytesSinceHeartbeat += frameBytes
+            encodedBytesTotal += frameBytes
 
             if frame.loss > 0 {
                 discardDecoder()
@@ -698,11 +723,14 @@ private actor CameraStreamWorker {
         }
         self.activeSession = nil
         if let activeGeneration {
+            let now = ProcessInfo.processInfo.systemUptime
+            let lastPacketAge = previousEncodedAt.map { "\(Int((now - $0) * 1_000))" } ?? "none"
             DirectStreamTelemetry.record(
                 component: "stream",
                 event: "session_stopped",
                 videoSessionID: activeGeneration,
-                detail: "reason=\(reason)"
+                elapsedMilliseconds: elapsedSinceGenerationStart(),
+                detail: "reason=\(reason) encoded_frames=\(encodedFrameCount) decoded_frames=\(decodedFrameCount) encoded_bytes=\(encodedBytesTotal) last_packet_age_ms=\(lastPacketAge)"
             )
         }
         activeGeneration = nil

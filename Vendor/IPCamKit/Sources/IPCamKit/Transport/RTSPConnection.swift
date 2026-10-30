@@ -41,6 +41,9 @@ actor RTSPTransportConnection {
   /// for an RTSP response (a camera that streamed media before its PLAY reply).
   private(set) var droppedInterleavedBeforeResponse = 0
 
+  /// Bytes read from the socket so far; reported with framing errors.
+  private(set) var bytesReceived = 0
+
   /// One-shot guard so the connect continuation resumes exactly once across the
   /// state handler and the timeout. Both run on the serial `queue`, so plain
   /// access is race-free (hence `@unchecked Sendable`).
@@ -71,12 +74,16 @@ actor RTSPTransportConnection {
         }
         let grace = waitingGraceSeconds
         let graceQueue = queue
-        conn.stateUpdateHandler = { state in
+        conn.stateUpdateHandler = { [weak conn] state in
+          // Name the interface and local address the attempt used, so a
+          // failure on the wrong network (e.g. a foreign LAN that reuses the
+          // camera's subnet) is obvious from the error alone.
+          let path = conn.map(Self.describePath) ?? "path unknown"
           switch state {
           case .ready:
             settle(.success(()))
           case .failed(let error):
-            settle(.failure(RTSPError.connectionFailed(error.localizedDescription)))
+            settle(.failure(RTSPError.connectionFailed("\(error.localizedDescription) [\(path)]")))
           case .waiting(let error):
             // NWConnection parks in .waiting for ECONNREFUSED/EHOSTUNREACH
             // instead of going to .failed. Give it a brief grace window to
@@ -84,7 +91,7 @@ actor RTSPTransportConnection {
             // the full connect timeout. A later .ready/.failed settles first
             // (the one-shot guard makes this deferred settle a no-op).
             graceQueue.asyncAfter(deadline: .now() + grace) {
-              settle(.failure(RTSPError.connectionFailed(error.localizedDescription)))
+              settle(.failure(RTSPError.connectionFailed("\(error.localizedDescription) [\(path)]")))
             }
           case .cancelled:
             settle(.failure(RTSPError.unexpectedDisconnection))
@@ -100,6 +107,7 @@ actor RTSPTransportConnection {
     } catch {
       // On timeout/failure, tear down the half-open socket. A late `.cancelled`
       // from this is ignored by the already-settled guard.
+      conn.stateUpdateHandler = nil
       conn.cancel()
       connection = nil
       throw error
@@ -154,7 +162,14 @@ actor RTSPTransportConnection {
     while true {
       // Try to parse from existing buffer
       var bufferCopy = readBuffer
-      if let (msg, _) = try parser.parse(&bufferCopy) {
+      let parsed: (RTSPMessage, Int)?
+      do {
+        parsed = try parser.parse(&bufferCopy)
+      } catch RTSPError.depacketizationError(let message) {
+        throw RTSPError.depacketizationError(
+          "\(message) after \(bytesReceived) bytes received; next bytes: \(Self.preview(readBuffer))")
+      }
+      if let (msg, _) = parsed {
         readBuffer = bufferCopy
         return msg
       }
@@ -169,8 +184,26 @@ actor RTSPTransportConnection {
 
       // Need more data
       let newData = try await readData()
+      bytesReceived += newData.count
       readBuffer.append(newData)
     }
+  }
+
+  /// `interface=en0 local=192.168.1.20:51234` for the connection's current path.
+  private static func describePath(_ connection: NWConnection) -> String {
+    guard let path = connection.currentPath else { return "no path yet" }
+    let interfaces = path.availableInterfaces.map(\.name).joined(separator: ",")
+    let local = path.localEndpoint.map { "\($0)" } ?? "none"
+    return "interface=\(interfaces.isEmpty ? "none" : interfaces) local=\(local)"
+  }
+
+  /// First 48 bytes as hex plus printable ASCII, enough to tell an RTSP
+  /// response from a misaligned RTP payload.
+  private static func preview(_ data: Data) -> String {
+    let head = data.prefix(48)
+    let hex = head.map { String(format: "%02x", $0) }.joined()
+    let ascii = String(head.map { (0x20..<0x7f).contains($0) ? Character(UnicodeScalar($0)) : "." })
+    return "\(hex) \"\(ascii)\" (\(data.count) buffered)"
   }
 
   /// Receive the next RTSP response, skipping interleaved data.

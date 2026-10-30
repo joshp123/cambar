@@ -422,6 +422,7 @@ actor SessionState {
     // a half-open TCP connection or a silent pre-PLAY request.
     connection = conn
     try await conn.connect(host: host, port: port)
+    onDiagnostic?(RTSPDiagnostic(severity: .info, message: "TCP connected \(await conn.ctx)"))
 
     // OPTIONS (best-effort): discover whether the server supports
     // GET_PARAMETER, which is the preferred keepalive method. A server that
