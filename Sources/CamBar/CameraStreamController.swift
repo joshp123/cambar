@@ -283,6 +283,7 @@ private actor CameraStreamWorker {
     private var decodedAtLastHeartbeat: UInt64 = 0
     private var encodedFrameCount: UInt64 = 0
     private var encodedAtLastHeartbeat: UInt64 = 0
+    private var encodedBytesSinceHeartbeat = 0
     private var previousEncodedTimestamp: TimeInterval?
     private var previousEncodedAt: TimeInterval?
     private var encodedJitterSamples = 0
@@ -402,6 +403,7 @@ private actor CameraStreamWorker {
         decodedAtLastHeartbeat = 0
         encodedFrameCount = 0
         encodedAtLastHeartbeat = 0
+        encodedBytesSinceHeartbeat = 0
         previousEncodedTimestamp = nil
         previousEncodedAt = nil
         resetEncodedCadenceWindow()
@@ -454,6 +456,7 @@ private actor CameraStreamWorker {
             guard desiredRunning, !permanentlyStopped, !Task.isCancelled else { break }
             guard case let .video(frame) = item else { continue }
             recordEncodedFrame(timestamp: frame.timestamp)
+            encodedBytesSinceHeartbeat += frame.nalus.reduce(0) { $0 + $1.count }
 
             if frame.loss > 0 {
                 discardDecoder()
@@ -628,6 +631,9 @@ private actor CameraStreamWorker {
             let decodedSinceHeartbeat = decodedFrameCount - decodedAtLastHeartbeat
             let encodedSinceHeartbeat = encodedFrameCount - encodedAtLastHeartbeat
             let frameAge = lastDecodedAt.map { Int((now - $0) * 1_000) }
+            let encodedKilobitsPerSecond = Int(
+                Double(encodedBytesSinceHeartbeat * 8) / (now - lastHeartbeatAt) / 1_000
+            )
             let averageEncodedJitter = encodedJitterSamples > 0
                 ? encodedJitterTotalMilliseconds / Double(encodedJitterSamples)
                 : 0
@@ -636,11 +642,12 @@ private actor CameraStreamWorker {
                 event: "frame_heartbeat",
                 videoSessionID: generation,
                 elapsedMilliseconds: frameAge,
-                detail: "decoded_frames=\(decodedFrameCount) decoded_interval=\(decodedSinceHeartbeat) encoded_frames=\(encodedFrameCount) encoded_interval=\(encodedSinceHeartbeat) encoded_jitter_avg_ms=\(String(format: "%.2f", averageEncodedJitter)) encoded_jitter_max_ms=\(String(format: "%.2f", encodedJitterMaximumMilliseconds)) encoded_gap_max_ms=\(String(format: "%.2f", encodedGapMaximumMilliseconds))"
+                detail: "encoded_kbps=\(encodedKilobitsPerSecond) decoded_frames=\(decodedFrameCount) decoded_interval=\(decodedSinceHeartbeat) encoded_frames=\(encodedFrameCount) encoded_interval=\(encodedSinceHeartbeat) encoded_jitter_avg_ms=\(String(format: "%.2f", averageEncodedJitter)) encoded_jitter_max_ms=\(String(format: "%.2f", encodedJitterMaximumMilliseconds)) encoded_gap_max_ms=\(String(format: "%.2f", encodedGapMaximumMilliseconds))"
             )
             self.lastHeartbeatAt = now
             decodedAtLastHeartbeat = decodedFrameCount
             encodedAtLastHeartbeat = encodedFrameCount
+            encodedBytesSinceHeartbeat = 0
             resetEncodedCadenceWindow()
         }
         return false

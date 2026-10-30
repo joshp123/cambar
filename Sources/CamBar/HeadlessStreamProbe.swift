@@ -52,7 +52,7 @@ enum HeadlessStreamProbe {
                 summary["first_frame_ms"] = Int((firstFrameAt - startedAt) * 1_000)
                 let liveSeconds = now - firstFrameAt
                 if liveSeconds > 0 {
-                    summary["fps"] = (Double(frameCount) / liveSeconds * 10).rounded() / 10
+                    summary["fps"] = Int((Double(frameCount) / liveSeconds).rounded())
                 }
             }
             if let videoSize {
