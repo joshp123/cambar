@@ -136,6 +136,12 @@ all on efficiency cores:
 - substream at 0.7 Mbit/s: 0.7%
 - open to live view: 74 to 125 ms with the real surface
 - viewing: about 4% plus about 2% in the decoder process
+- energy, hidden, from the kernel counter (`Scripts/Support/ProcessEnergy.swift`):
+  1.5 to 3 mW for CamBar. Tailscale's extension (root, unreadable) uses about
+  twice CamBar's CPU decrypting the stream away from home. Together well under
+  10 mW, about 0.3% of the 84 Wh battery per day. The unmeasured cost is the
+  Wi-Fi radio, kept awake by a packet every 40 ms on either stream.
+  System-wide `SystemPowerIn` from ioreg is too coarse to see this
 
 What the hidden cost is (Instruments Time Profiler): about 40% Apple's
 in-process TCP stack, 25% RTP depacketising, the rest allocation and copying.
