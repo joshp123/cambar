@@ -6,6 +6,9 @@ if let probeIndex = CommandLine.arguments.firstIndex(of: "--probe") {
 }
 
 let app = NSApplication.shared
+if CommandLine.arguments.contains("--ui-probe") {
+    OffscreenSurfaceProbe.run(on: app)
+}
 let delegate = AppDelegate()
 app.delegate = delegate
 app.setActivationPolicy(.accessory)

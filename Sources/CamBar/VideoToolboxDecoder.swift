@@ -151,7 +151,9 @@ final class VideoToolboxDecoder: @unchecked Sendable {
         Unmanaged<CallbackContext>.fromOpaque(callbackContextPointer).release()
     }
 
-    func decode(_ frame: PublicVideoFrame) throws {
+    /// `output: false` advances decoder state without producing a picture,
+    /// which is how a viewer catches up through cached frames.
+    func decode(_ frame: PublicVideoFrame, output: Bool = true) throws {
         let compressed = AVCCPacketizer.packetize(frame.nalus, codec: codec)
         guard !compressed.isEmpty else { return }
 
@@ -223,8 +225,8 @@ final class VideoToolboxDecoder: @unchecked Sendable {
         status = VTDecompressionSessionDecodeFrame(
             currentSession,
             sampleBuffer: sampleBuffer,
-            flags: .asynchronousRealtime,
-            frameRefcon: nil,
+            flags: output ? .asynchronousRealtime : .asynchronousWithoutOutput,
+            frameRefcon: output ? nil : Self.noOutputMarker,
             infoFlagsOut: &infoFlags,
         )
         guard status == noErr else {
@@ -300,9 +302,14 @@ final class VideoToolboxDecoder: @unchecked Sendable {
         return description
     }
 
+    /// Non-nil per-frame refcon: VideoToolbox treats do-not-output as a hint.
+    private static var noOutputMarker: UnsafeMutableRawPointer? {
+        UnsafeMutableRawPointer(bitPattern: 1)
+    }
+
     private static let outputCallback: VTDecompressionOutputCallback = {
         outputRefCon,
-        _,
+        sourceFrameRefCon,
         status,
         _,
         imageBuffer,
@@ -312,10 +319,11 @@ final class VideoToolboxDecoder: @unchecked Sendable {
         let context = Unmanaged<CallbackContext>
             .fromOpaque(outputRefCon)
             .takeUnretainedValue()
-        guard status == noErr, let imageBuffer else {
+        guard status == noErr else {
             context.report(error: status)
             return
         }
+        guard sourceFrameRefCon == nil, let imageBuffer else { return }
         context.publish(
             pixelBuffer: imageBuffer,
             presentationTime: presentationTimeStamp
@@ -373,4 +381,5 @@ private extension VTDecodeFrameFlags {
     /// Decode asynchronously without the 1x-only low-power hint. A live stream
     /// must be able to catch up promptly after a short scheduling stall.
     static let asynchronousRealtime = VTDecodeFrameFlags(rawValue: 1 << 0)
+    static let asynchronousWithoutOutput = VTDecodeFrameFlags(rawValue: 1 << 0 | 1 << 1)
 }

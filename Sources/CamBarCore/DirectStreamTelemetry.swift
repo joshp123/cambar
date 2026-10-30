@@ -13,6 +13,9 @@ public enum DirectStreamTelemetry {
     /// into the running app's log.
     nonisolated(unsafe) public static var writesToStandardErrorInsteadOfLogFile = false
 
+    /// Lets the off-screen probe react to events it would otherwise only log.
+    nonisolated(unsafe) public static var observer: (@Sendable (_ event: String, _ openID: String?, _ elapsedMilliseconds: Int?) -> Void)?
+
     public static let logURL = FileManager.default
         .urls(for: .cachesDirectory, in: .userDomainMask)[0]
         .appendingPathComponent("CamBar/direct/direct-stream-events.jsonl")
@@ -33,6 +36,7 @@ public enum DirectStreamTelemetry {
         elapsedMilliseconds: Int? = nil,
         detail: String? = nil
     ) {
+        observer?(event, openID, elapsedMilliseconds)
         let occurredAt = Date()
         let occurredUptimeMilliseconds = Int(ProcessInfo.processInfo.systemUptime * 1_000)
         let safeDetail = detail.map(StreamSourceResolver.redactRtspCredentials(in:))

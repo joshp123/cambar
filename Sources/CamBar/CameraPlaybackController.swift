@@ -59,6 +59,7 @@ final class CameraPlaybackController {
     func show(openID: String, startedAt: TimeInterval) {
         isSuspended = false
         isVisible = true
+        stream.setViewer(surface.rawValue, active: true)
         currentOpenID = openID
         openStartedAt = startedAt
         minimumFreshSequence = stream.latestSequence
@@ -103,6 +104,7 @@ final class CameraPlaybackController {
 
     func hide() {
         isVisible = false
+        stream.setViewer(surface.rawValue, active: false)
         currentOpenID = nil
         openStartedAt = nil
         minimumFreshSequence = nil

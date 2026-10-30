@@ -86,9 +86,12 @@ final class CameraStreamController {
 
     var onStateChange: ((State) -> Void)?
     var onVideoSizeChange: ((CGSize) -> Void)?
+    /// The fallback stream's height, or nil while on the main stream.
+    var onFallbackStreamHeightChange: ((Int?) -> Void)?
     private(set) var state: State = .stopped
     private(set) var latestFrame: CameraFrame?
     private(set) var videoSize: CGSize?
+    private var fallbackStreamHeight: Int?
 
     var latestSequence: UInt64 {
         latestFrame?.sequence ?? 0
@@ -102,6 +105,8 @@ final class CameraStreamController {
     private var isPermanentlyStopped = false
     private var lifecycleCommandID: UInt64 = 0
     private var activeGeneration: String?
+    private var activeViewers: Set<String> = []
+    private var viewingCommandID: UInt64 = 0
     private let networkMonitor = NWPathMonitor()
     private var networkSummary: String?
 
@@ -221,6 +226,27 @@ final class CameraStreamController {
         Task { await worker.shutdown() }
     }
 
+    /// Decoding is the expensive part, so it runs only while a surface is
+    /// visible. Hidden, the worker just keeps frames since the last keyframe.
+    func setViewer(_ viewer: String, active: Bool) {
+        let wasViewed = !activeViewers.isEmpty
+        if active {
+            activeViewers.insert(viewer)
+        } else {
+            activeViewers.remove(viewer)
+        }
+        guard !activeViewers.isEmpty != wasViewed else { return }
+        viewingCommandID &+= 1
+        let commandID = viewingCommandID
+        let viewed = !activeViewers.isEmpty
+        Task { await worker.setViewed(viewed, commandID: commandID) }
+    }
+
+    /// Agent test hook: take the fallback path without needing a bad link.
+    func forceFallbackStream() {
+        Task { await worker.forceFallback() }
+    }
+
     func addObserver(
         onFrame: @escaping (CameraFrame?) -> Void,
         onState: @escaping (State) -> Void
@@ -278,6 +304,11 @@ final class CameraStreamController {
             videoSize = frame.size
             onVideoSizeChange?(frame.size)
         }
+        let height = frame.isFallbackStream ? Int(frame.size.height) : nil
+        if height != fallbackStreamHeight {
+            fallbackStreamHeight = height
+            onFallbackStreamHeightChange?(height)
+        }
         for observer in observers.values {
             observer.onFrame(frame)
         }
@@ -320,6 +351,13 @@ private actor CameraStreamWorker {
     private var activeGenerationIsFallback = false
     private var pendingStreamSwitch: String?
     private var lagTracker = RealTimeLagTracker()
+    private var isViewed = false
+    private var latestViewingCommandID: UInt64 = 0
+    private var awaitingKeyframe = true
+    /// Compressed frames since the last keyframe: everything a decoder needs
+    /// to produce the newest picture, bounded by the camera's keyframe spacing.
+    private var framesSinceKeyframe: [PublicVideoFrame] = []
+    private var pendingCatchUp: (startedAt: TimeInterval, newestTimestamp: TimeInterval, frames: Int)?
     private var mediaSecondsSinceHeartbeat = 0.0
     private var heartbeatsSinceFirstFrame = 0
     private var resourceSampleAtHeartbeat = ProcessResourceUsage.sample()
@@ -478,6 +516,52 @@ private actor CameraStreamWorker {
         await activeSession?.abort()
     }
 
+    func setViewed(_ viewed: Bool, commandID: UInt64) {
+        guard commandID > latestViewingCommandID else { return }
+        latestViewingCommandID = commandID
+        guard viewed != isViewed else { return }
+        isViewed = viewed
+        DirectStreamTelemetry.record(
+            component: "stream",
+            event: viewed ? "decoding_started" : "decoding_stopped",
+            videoSessionID: activeGeneration,
+            detail: "cached_frames=\(framesSinceKeyframe.count)"
+        )
+        guard viewed else { return }
+        lastDecodedAt = ProcessInfo.processInfo.systemUptime
+        decodeCachedFrames()
+    }
+
+    /// Runs the decoder through the cached frames, showing only the newest.
+    private func decodeCachedFrames() {
+        guard let decoder, !awaitingKeyframe else { return }
+        let cached = framesSinceKeyframe
+        if let newest = cached.last {
+            pendingCatchUp = (ProcessInfo.processInfo.systemUptime, newest.timestamp, cached.count)
+        }
+        do {
+            for (index, frame) in cached.enumerated() {
+                try decoder.decode(frame, output: index == cached.count - 1)
+            }
+        } catch {
+            DirectStreamTelemetry.record(
+                component: "decoder",
+                event: "decode_submission_failed",
+                videoSessionID: activeGeneration,
+                detail: "error=\(error)"
+            )
+            discardDecoder()
+            awaitingKeyframe = true
+        }
+    }
+
+    func forceFallback() async {
+        guard fallbackSince == nil, fallbackSourceURL != nil else { return }
+        fallbackSince = ProcessInfo.processInfo.systemUptime
+        pendingStreamSwitch = "forced by test"
+        await activeSession?.abort()
+    }
+
     func shutdown() async {
         permanentlyStopped = true
         desiredRunning = false
@@ -512,6 +596,8 @@ private actor CameraStreamWorker {
         resetEncodedCadenceWindow()
         firstFrameEmitted = false
         lagTracker = RealTimeLagTracker()
+        awaitingKeyframe = true
+        framesSinceKeyframe = []
         mediaSecondsSinceHeartbeat = 0
         heartbeatsSinceFirstFrame = 0
 
@@ -557,7 +643,6 @@ private actor CameraStreamWorker {
         var parameterSets = Self.parameterSets(
             codec: video.codec, vps: video.vps, sps: video.sps, pps: video.pps
         )
-        var awaitingKeyframe = true
         for try await item in session.frames() {
             guard desiredRunning, !permanentlyStopped, !Task.isCancelled else { break }
             guard case let .video(frame) = item else { continue }
@@ -569,6 +654,7 @@ private actor CameraStreamWorker {
             if frame.loss > 0 {
                 discardDecoder()
                 awaitingKeyframe = true
+                framesSinceKeyframe = []
                 DirectStreamTelemetry.record(
                     component: "decoder",
                     event: "packet_loss_discontinuity",
@@ -587,6 +673,7 @@ private actor CameraStreamWorker {
                 if parameterSets != nil {
                     discardDecoder()
                     awaitingKeyframe = true
+                    framesSinceKeyframe = []
                     DirectStreamTelemetry.record(
                         component: "decoder",
                         event: "parameter_sets_changed",
@@ -603,6 +690,15 @@ private actor CameraStreamWorker {
                 awaitingKeyframe = false
             }
 
+            if frame.isKeyframe {
+                framesSinceKeyframe = [frame]
+            } else {
+                framesSinceKeyframe.append(frame)
+            }
+            // Decode the first picture hidden too: it proves the decoder works
+            // and is what marks the stream ready.
+            guard isViewed || !firstFrameEmitted else { continue }
+
             do {
                 try decoder?.decode(frame)
             } catch {
@@ -614,6 +710,7 @@ private actor CameraStreamWorker {
                 )
                 discardDecoder()
                 awaitingKeyframe = true
+                framesSinceKeyframe = []
             }
         }
     }
@@ -690,6 +787,17 @@ private actor CameraStreamWorker {
               !permanentlyStopped else { return }
         lastDecodedAt = decoded.decodedAt
         decodedFrameCount += 1
+        if let catchUp = pendingCatchUp {
+            pendingCatchUp = nil
+            let gap = catchUp.newestTimestamp - decoded.presentationTime.seconds
+            DirectStreamTelemetry.record(
+                component: "decoder",
+                event: "caught_up",
+                videoSessionID: decoded.generation,
+                elapsedMilliseconds: Int((decoded.decodedAt - catchUp.startedAt) * 1_000),
+                detail: "cached_frames=\(catchUp.frames) behind_newest_cached_ms=\(Int(gap * 1_000))"
+            )
+        }
         nextFrameSequence += 1
         let frame = CameraFrame(
             generation: decoded.generation,
@@ -738,7 +846,9 @@ private actor CameraStreamWorker {
             return true
         }
         let now = ProcessInfo.processInfo.systemUptime
-        let progressAt = lastDecodedAt ?? generationStartedAt ?? now
+        // Hidden sessions decode nothing, so arriving data is their progress.
+        let lastProgress = isViewed || !firstFrameEmitted ? lastDecodedAt : previousEncodedAt
+        let progressAt = lastProgress ?? generationStartedAt ?? now
         if now - progressAt >= 5 {
             DirectStreamTelemetry.record(
                 component: "stream",
@@ -752,7 +862,7 @@ private actor CameraStreamWorker {
         if let lastHeartbeatAt, now - lastHeartbeatAt >= 5 {
             let decodedSinceHeartbeat = decodedFrameCount - decodedAtLastHeartbeat
             let encodedSinceHeartbeat = encodedFrameCount - encodedAtLastHeartbeat
-            let frameAge = lastDecodedAt.map { Int((now - $0) * 1_000) }
+            let frameAge = (isViewed ? lastDecodedAt : previousEncodedAt).map { Int((now - $0) * 1_000) }
             let encodedKilobitsPerSecond = Int(
                 Double(encodedBytesSinceHeartbeat * 8) / (now - lastHeartbeatAt) / 1_000
             )
@@ -772,7 +882,7 @@ private actor CameraStreamWorker {
                 event: "frame_heartbeat",
                 videoSessionID: generation,
                 elapsedMilliseconds: frameAge,
-                detail: "stream=\(activeGenerationIsFallback ? "fallback" : "main") real_time_ratio=\(String(format: "%.2f", realTimeRatio)) seconds_behind=\(String(format: "%.2f", lagTracker.secondsBehind)) cpu_percent=\(String(format: "%.1f", cpuPercent)) memory_mb=\(resources.memoryMegabytes) encoded_kbps=\(encodedKilobitsPerSecond) decoded_frames=\(decodedFrameCount) decoded_interval=\(decodedSinceHeartbeat) encoded_frames=\(encodedFrameCount) encoded_interval=\(encodedSinceHeartbeat) encoded_jitter_avg_ms=\(String(format: "%.2f", averageEncodedJitter)) encoded_jitter_max_ms=\(String(format: "%.2f", encodedJitterMaximumMilliseconds)) encoded_gap_max_ms=\(String(format: "%.2f", encodedGapMaximumMilliseconds))"
+                detail: "stream=\(activeGenerationIsFallback ? "fallback" : "main") viewed=\(isViewed) real_time_ratio=\(String(format: "%.2f", realTimeRatio)) seconds_behind=\(String(format: "%.2f", lagTracker.secondsBehind)) cpu_percent=\(String(format: "%.1f", cpuPercent)) memory_mb=\(resources.memoryMegabytes) encoded_kbps=\(encodedKilobitsPerSecond) decoded_frames=\(decodedFrameCount) decoded_interval=\(decodedSinceHeartbeat) encoded_frames=\(encodedFrameCount) encoded_interval=\(encodedSinceHeartbeat) encoded_jitter_avg_ms=\(String(format: "%.2f", averageEncodedJitter)) encoded_jitter_max_ms=\(String(format: "%.2f", encodedJitterMaximumMilliseconds)) encoded_gap_max_ms=\(String(format: "%.2f", encodedGapMaximumMilliseconds))"
             )
             self.lastHeartbeatAt = now
             decodedAtLastHeartbeat = decodedFrameCount

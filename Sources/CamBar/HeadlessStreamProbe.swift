@@ -3,13 +3,17 @@ import CoreImage
 import Foundation
 
 /// `CamBar --probe [seconds]` runs the app's real RTSP and hardware-decode
-/// pipeline with no UI, streams telemetry to stderr and prints one JSON
-/// summary to stdout. It saves the last decoded frame as a PNG so an agent
-/// can look at the picture, including the camera's on-screen clock. Exit
-/// status 0 means live video was still arriving at the end of the run. It
-/// does not touch the running app or its log.
+/// pipeline with no UI and no effect on the running app or its log. It stays
+/// hidden for `seconds` as if the menu were closed, measures five reveals
+/// (the headless equivalent of clicking the icon), then watches for five
+/// seconds and saves the last picture as a PNG. Telemetry goes to stderr and
+/// one JSON summary to stdout. Exit status 0 means live video at the end.
 @MainActor
 enum HeadlessStreamProbe {
+    private static let revealCount = 5
+    private static let viewingSeconds: TimeInterval = 5
+    private static let viewer = "probe"
+
     static func run(seconds: TimeInterval) -> Never {
         DirectStreamTelemetry.writesToStandardErrorInsteadOfLogFile = true
         guard let sourceURL = StreamSourceResolver.resolveRtspURL() else {
@@ -17,23 +21,20 @@ enum HeadlessStreamProbe {
             exit(1)
         }
 
-        let startedAt = ProcessInfo.processInfo.systemUptime
+        let startedAt = uptime
         let stream = CameraStreamController(sourceURL: sourceURL)
         var firstFrameAt: TimeInterval?
         var lastFrameAt: TimeInterval?
         var frameCount = 0
         var retryCount = 0
-        var videoSize: CGSize?
         var lastFrame: CameraFrame?
 
         _ = stream.addObserver(
             onFrame: { frame in
                 guard let frame else { return }
-                let now = ProcessInfo.processInfo.systemUptime
-                firstFrameAt = firstFrameAt ?? now
-                lastFrameAt = now
+                lastFrameAt = uptime
+                firstFrameAt = firstFrameAt ?? uptime
                 frameCount += 1
-                videoSize = frame.size
                 lastFrame = frame
             },
             onState: { state in
@@ -43,51 +44,105 @@ enum HeadlessStreamProbe {
         stream.start()
 
         Task { @MainActor in
-            try? await Task.sleep(for: .seconds(seconds))
-            let now = ProcessInfo.processInfo.systemUptime
-            let isLive = stream.state == .ready && (lastFrameAt.map { now - $0 < 1 } ?? false)
             var summary: [String: Any] = [
-                "result": isLive ? "live" : (frameCount > 0 ? "stalled" : "no_video"),
                 "camera": StreamSourceResolver.redactRtspCredentials(in: sourceURL),
-                "probe_seconds": seconds,
-                "frames": frameCount,
-                "retries": retryCount,
+                "hidden_seconds": seconds,
             ]
-            if let firstFrameAt {
-                summary["first_frame_ms"] = Int((firstFrameAt - startedAt) * 1_000)
-                let liveSeconds = now - firstFrameAt
-                if liveSeconds > 0 {
-                    summary["fps"] = Int((Double(frameCount) / liveSeconds).rounded())
+            while firstFrameAt == nil, uptime - startedAt < max(seconds, 15) {
+                try? await Task.sleep(for: .milliseconds(50))
+            }
+            guard let firstFrameAt else {
+                summary["result"] = "no_video"
+                summary["retries"] = retryCount
+                finish(summary, stream: stream, exitCode: 1)
+            }
+            summary["first_frame_ms"] = Int((firstFrameAt - startedAt) * 1_000)
+
+            let hiddenStart = ProcessResourceUsage.sample()
+            try? await Task.sleep(for: .seconds(seconds))
+            let hiddenEnd = ProcessResourceUsage.sample()
+            summary["hidden_cpu_percent"] = rounded(hiddenEnd.cpuPercent(since: hiddenStart))
+            summary["memory_mb"] = hiddenEnd.memoryMegabytes
+
+            var revealMilliseconds: [Int] = []
+            var revealPicture: String?
+            var revealFrameAges: [Int] = []
+            for index in 0..<revealCount {
+                let baseline = stream.latestSequence
+                let revealedAt = uptime
+                stream.setViewer(viewer, active: true)
+                while stream.latestSequence <= baseline, uptime - revealedAt < 3 {
+                    try? await Task.sleep(for: .milliseconds(1))
                 }
+                revealMilliseconds.append(Int((uptime - revealedAt) * 1_000))
+                // Keep the picture a user would see first, to check it is whole.
+                if let frame = stream.latestFrame {
+                    revealPicture = savePicture(frame, name: "reveal-\(index)")
+                    revealFrameAges.append(Int((uptime - frame.decodedAt) * 1_000))
+                }
+                stream.setViewer(viewer, active: false)
+                // Land somewhere different in the keyframe interval each time.
+                try? await Task.sleep(for: .seconds(Double.random(in: 0.4...2.1)))
             }
-            if let videoSize {
-                summary["width"] = Int(videoSize.width)
-                summary["height"] = Int(videoSize.height)
-            }
+            summary["reveal_ms"] = revealMilliseconds.sorted()
+            summary["reveal_png"] = revealPicture
+
+            let viewingFrom = frameCount
+            let viewingStart = ProcessResourceUsage.sample()
+            stream.setViewer(viewer, active: true)
+            try? await Task.sleep(for: .seconds(viewingSeconds))
+            let isLive = stream.state == .ready && (lastFrameAt.map { uptime - $0 < 1 } ?? false)
+            summary["viewing_cpu_percent"] = rounded(
+                ProcessResourceUsage.sample().cpuPercent(since: viewingStart)
+            )
+            summary["viewing_fps"] = Int((Double(frameCount - viewingFrom) / viewingSeconds).rounded())
+            summary["retries"] = retryCount
+            summary["result"] = isLive ? "live" : "stalled"
             if let lastFrame {
-                let frameURL = FileManager.default.temporaryDirectory
-                    .appendingPathComponent("cambar-probe-last-frame.png")
-                let image = CIImage(cvPixelBuffer: lastFrame.pixelBuffer)
-                try? CIContext().writePNGRepresentation(
-                    of: image,
-                    to: frameURL,
-                    format: .RGBA8,
-                    colorSpace: CGColorSpace(name: CGColorSpace.sRGB)!
-                )
-                summary["last_frame_png"] = frameURL.path
-                let localTime = ISO8601DateFormatter()
-                localTime.timeZone = .current
-                localTime.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-                summary["last_frame_decoded_at"] = localTime.string(
-                    from: Date().addingTimeInterval(lastFrame.decodedAt - now)
-                )
+                summary["width"] = Int(lastFrame.size.width)
+                summary["height"] = Int(lastFrame.size.height)
+                summary["last_frame_png"] = savePicture(lastFrame, name: "last-frame")
+                summary["last_frame_decoded_at"] = localTimestamp(ofUptime: lastFrame.decodedAt)
             }
-            printSummary(summary)
-            stream.shutdown()
-            DirectStreamTelemetry.flush()
-            exit(isLive ? 0 : 1)
+            finish(summary, stream: stream, exitCode: isLive ? 0 : 1)
         }
         dispatchMain()
+    }
+
+    private static var uptime: TimeInterval { ProcessInfo.processInfo.systemUptime }
+
+    private static func rounded(_ value: Double) -> NSDecimalNumber {
+        NSDecimalNumber(string: String(format: "%.1f", value))
+    }
+
+    private static func savePicture(_ frame: CameraFrame, name: String) -> String {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("cambar-probe-\(name).png")
+        try? CIContext().writePNGRepresentation(
+            of: CIImage(cvPixelBuffer: frame.pixelBuffer),
+            to: url,
+            format: .RGBA8,
+            colorSpace: CGColorSpace(name: CGColorSpace.sRGB)!
+        )
+        return url.path
+    }
+
+    private static func localTimestamp(ofUptime moment: TimeInterval) -> String {
+        let formatter = ISO8601DateFormatter()
+        formatter.timeZone = .current
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return formatter.string(from: Date().addingTimeInterval(moment - uptime))
+    }
+
+    private static func finish(
+        _ summary: [String: Any],
+        stream: CameraStreamController,
+        exitCode: Int32
+    ) -> Never {
+        printSummary(summary)
+        stream.shutdown()
+        DirectStreamTelemetry.flush()
+        exit(exitCode)
     }
 
     private static func printSummary(_ summary: [String: Any]) {

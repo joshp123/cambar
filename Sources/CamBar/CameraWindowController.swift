@@ -11,6 +11,7 @@ final class CameraWindowController: NSWindowController, NSWindowDelegate {
     init(
         stream: CameraStreamController,
         nativeVideoSize: CGSize,
+        uiState: CamBarUIState,
         onClose: @escaping () -> Void = {}
     ) {
         let playback = CameraPlaybackController(
@@ -20,7 +21,9 @@ final class CameraWindowController: NSWindowController, NSWindowDelegate {
         )
         self.playback = playback
         self.onClose = onClose
-        let hosting = NSHostingController(rootView: CameraWindowView(playback: playback))
+        let hosting = NSHostingController(
+            rootView: CameraWindowView(playback: playback, state: uiState)
+        )
         let window = NSWindow(contentViewController: hosting)
         window.title = "CamBar"
         window.backgroundColor = .black
@@ -89,10 +92,16 @@ final class CameraWindowController: NSWindowController, NSWindowDelegate {
 
 struct CameraWindowView: View {
     let playback: CameraPlaybackController
+    var state: CamBarUIState
 
     var body: some View {
         CameraVideoView(playback: playback)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .background(Color.black)
+            .overlay(alignment: .bottomLeading) {
+                if let height = state.fallbackStreamHeight {
+                    FallbackStreamBadge(height: height).padding(12)
+                }
+            }
     }
 }

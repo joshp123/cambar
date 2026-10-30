@@ -5,10 +5,30 @@ import SwiftUI
 @Observable
 final class CamBarUIState {
     var cameraUnavailable = false
+    var fallbackStreamHeight: Int?
     var videoSize: CGSize
 
     init(videoSize: CGSize) {
         self.videoSize = videoSize
+    }
+}
+
+/// Quiet sign that the link forced the lower-quality stream.
+struct FallbackStreamBadge: View {
+    let height: Int
+
+    var body: some View {
+        HStack(spacing: 4) {
+            Image(systemName: "wifi.exclamationmark")
+            Text("\(height)p")
+        }
+        .font(.system(size: 11, weight: .semibold))
+        .foregroundStyle(.secondary)
+        .padding(.horizontal, 9)
+        .frame(height: 24)
+        .background(.regularMaterial, in: Capsule())
+        .help("Weak connection: showing the \(height)p stream")
+        .accessibilityIdentifier("com.cambar.fallback-stream-badge")
     }
 }
 
@@ -50,6 +70,12 @@ struct ContentView: View {
             .accessibilityIdentifier("com.cambar.open-window")
             .help("Open window")
             .padding(Self.contentInset + 8)
+        }
+        .overlay(alignment: .bottomLeading) {
+            if let height = state.fallbackStreamHeight {
+                FallbackStreamBadge(height: height)
+                    .padding(Self.contentInset + 10)
+            }
         }
         .frame(width: contentSize.width, height: contentSize.height)
     }

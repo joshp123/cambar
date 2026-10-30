@@ -41,6 +41,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         streamController.onVideoSizeChange = { [weak self] size in
             self?.nativeVideoSize = size
         }
+        streamController.onFallbackStreamHeightChange = { [weak self] height in
+            self?.uiState.fallbackStreamHeight = height
+        }
         streamController.start()
 
         workspaceObservers.append(NSWorkspace.shared.notificationCenter.addObserver(
@@ -367,6 +370,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
             windowController = CameraWindowController(
                 stream: streamController,
                 nativeVideoSize: nativeVideoSize,
+                uiState: uiState,
                 onClose: { [weak self] in
                     self?.playbackController.resumeAfterPopout()
                     self?.windowController = nil

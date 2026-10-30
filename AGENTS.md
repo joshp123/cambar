@@ -20,6 +20,9 @@ Purpose: one-stop shop for agents to develop + debug CamBar fast.
   - one stream runs at a time; when main slips 3 s behind real time, or fails
     three times running, CamBar falls back to the substream `/102`. It tries
     main again after 5 minutes, on wake and on any network change
+  - while no surface is visible, keep receiving but do not decode: hold only
+    the compressed frames since the last keyframe. On open, decode those
+    without output and show the newest, then continue live
   - retain only the newest decoded frame; never accumulate a playback queue
   - normal playback must not use go2rtc, WebKit, ffmpeg, HLS files or AVPlayer
   - old fallback playback paths should be deleted, not preserved
@@ -39,13 +42,20 @@ Josh uses this Mac while agents work. Never open the popover, take screenshots
 or drive the UI unless the change is to presentation code and he has agreed.
 Look at raw evidence and reason from it; do not build bespoke assertions.
 
+Never screenshot from a probe or run a GUI binary outside its app bundle: both
+can bring windows forward. Use the tools below. The Mac mini is at home on the
+camera's LAN, good for ffmpeg and network checks, but it runs macOS 26 and
+CamBar needs 27.
+
 1. `swift test` for the reducers, parsers and frame policy.
 2. `CamBar --probe [seconds]` for the stream pipeline: the same
    `CameraStreamController` and VideoToolbox decoder as the app, with no UI and
    no effect on the running app. stderr is the telemetry; stdout is one JSON
    line (`result`: `live`, `stalled`, `no_video` or `no_camera_configured`;
-   `first_frame_ms`, `fps`, size, `retries`). It saves the last frame to
-   `last_frame_png` with its local decode time in `last_frame_decoded_at`.
+   `first_frame_ms`, `hidden_cpu_percent`, `reveal_ms`, `viewing_fps`,
+   `viewing_cpu_percent`, size, `retries`). It stays hidden for `seconds`,
+   measures five reveals, then watches for 5 s. It saves `reveal_png`, the first
+   picture of a reveal, and `last_frame_png`, with `last_frame_decoded_at`.
    Open the PNG: the camera prints its clock top left, so the difference is
    the real end-to-end latency, and you can see black, garbled or frozen video.
    Set `CAMBAR_RTSP_URL` to probe another stream (`/Streaming/Channels/102` is
@@ -66,7 +76,14 @@ Look at raw evidence and reason from it; do not build bespoke assertions.
      Main needs about 3 Mbit/s and the substream under 1 Mbit/s.
    - `stream_switched`: a move between main and the substream, with the reason.
    - `live_view.elapsed_ms`: click-to-live time.
-4. `Scripts/smoke_ui.sh` drives the real popover on screen. Last resort only.
+4. `Scripts/ui_probe.sh` for presentation code. It runs the real popover
+   content and video surface in an invisible off-screen window from the signed
+   bundle, and fails if CamBar ever becomes frontmost. It reports
+   `open_to_live_ms` over five opens, forces a switch to the substream, and
+   saves the view tree and video pictures as PNGs (the view-tree PNG shows the
+   badge and controls; the video area is black there because the video layer
+   does not render into it). It cannot cover NSPopover or the status item.
+5. `Scripts/smoke_ui.sh` drives the real popover on screen. Last resort only.
 
 ## Runtime inputs (source of truth)
 RTSP resolution order:
