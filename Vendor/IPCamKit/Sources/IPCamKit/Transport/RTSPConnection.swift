@@ -192,7 +192,7 @@ actor RTSPTransportConnection {
   /// `interface=en0 local=192.168.1.20:51234` for the connection's current path.
   private static func describePath(_ connection: NWConnection) -> String {
     guard let path = connection.currentPath else { return "no path yet" }
-    let interfaces = path.availableInterfaces.map(\.name).joined(separator: ",")
+    let interfaces = Array(Set(path.availableInterfaces.map(\.name))).sorted().joined(separator: ",")
     let local = path.localEndpoint.map { "\($0)" } ?? "none"
     return "interface=\(interfaces.isEmpty ? "none" : interfaces) local=\(local)"
   }
