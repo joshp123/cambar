@@ -31,22 +31,35 @@ swift build && .build/debug/CamBar --probe 10   # headless: real RTSP + hardware
 ./Scripts/deploy_app.sh   # commit first; tests, installs, restarts in background, checks the log
 ```
 
-## Testing without getting in Josh's way
+## Testing and debugging without getting in Josh's way
 Josh uses this Mac while agents work. Never open the popover, take screenshots
 or drive the UI unless the change is to presentation code and he has agreed.
-Prefer, in order:
+Look at raw evidence and reason from it; do not build bespoke assertions.
+
 1. `swift test` for the reducers, parsers and frame policy.
-2. `CamBar --probe [seconds]` for the stream pipeline. It runs the same
+2. `CamBar --probe [seconds]` for the stream pipeline: the same
    `CameraStreamController` and VideoToolbox decoder as the app, with no UI and
-   no effect on the running app. Telemetry goes to stderr; stdout is one JSON
-   line with `result` (`live`, `stalled`, `no_video`, `no_camera_configured`),
-   `first_frame_ms`, `fps`, `width`, `height` and `retries`. Exit 0 means live.
-   Use `~/Applications/CamBar.app/Contents/MacOS/CamBar --probe` to test the
-   installed build.
-3. The running app's log, `~/Library/Caches/CamBar/direct/direct-stream-events.jsonl`.
-   Filter by the newest `launch` event's `session_id`. `frame_heartbeat` every
-   5 s means the warm stream is alive; `session_reconnecting` carries the
-   failure reason; `live_view.elapsed_ms` is click-to-live time.
+   no effect on the running app. stderr is the telemetry; stdout is one JSON
+   line (`result`: `live`, `stalled`, `no_video` or `no_camera_configured`;
+   `first_frame_ms`, `fps`, size, `retries`). It saves the last frame to
+   `last_frame_png` with its local decode time in `last_frame_decoded_at`.
+   Open the PNG: the camera prints its clock top left, so the difference is
+   the real end-to-end latency, and you can see black, garbled or frozen video.
+   Set `CAMBAR_RTSP_URL` to probe another stream (`/Streaming/Channels/102` is
+   the substream). Use `~/Applications/CamBar.app/Contents/MacOS/CamBar --probe`
+   to test the installed build.
+3. The running app's log, `~/Library/Caches/CamBar/direct/direct-stream-events.jsonl`
+   (also in `log show --predicate 'subsystem == "com.cambar"'`). Filter by the
+   newest `launch` event's `session_id`. What to read:
+   - `network_changed`: interfaces up (`utun*` is Tailscale).
+   - `rtsp diagnostic "TCP connected <local>(me)-><camera>"`: which address
+     reached the camera. A `100.x` local address means Tailscale.
+   - `session_stopped`: the real failure, with `[interface=… local=…]` for
+     connection failures, plus duration, frame and byte counts and
+     `last_packet_age_ms`. Framing errors include the next raw bytes.
+   - `frame_heartbeat` every 5 s: `encoded_kbps` received and frame counts.
+     The main stream needs about 5 Mbit/s; lower means the link is the limit.
+   - `live_view.elapsed_ms`: click-to-live time.
 4. `Scripts/smoke_ui.sh` drives the real popover on screen. Last resort only.
 
 ## Runtime inputs (source of truth)
