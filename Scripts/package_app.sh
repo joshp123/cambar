@@ -87,7 +87,10 @@ if [[ -z "$APP_IDENTITY" ]]; then
   echo "ERROR: Apple Development signing identity not found; refusing an unstable ad-hoc build." >&2
   exit 1
 fi
-SIGN_ARGS=(--force --options runtime --sign "$APP_IDENTITY")
+# Check the team, not the certificate's name: macOS ties Local Network permission
+# to this requirement, and Apple renames certificates at renewal.
+SIGN_ARGS=(--force --options runtime --timestamp --sign "$APP_IDENTITY"
+  -r='designated => identifier "com.cambar" and anchor apple generic and certificate leaf[subject.OU] = "7M8BR7R488" and certificate 1[field.1.2.840.113635.100.6.2.1]')
 codesign "${SIGN_ARGS[@]}" "$STAGED_APP"
 codesign --verify --deep --strict "$STAGED_APP"
 STAGED_TEAM_ID=$(codesign -dv --verbose=4 "$STAGED_APP" 2>&1 | awk -F= '/^TeamIdentifier=/ { print $2; exit }')
