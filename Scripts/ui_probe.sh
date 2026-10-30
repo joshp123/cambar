@@ -11,7 +11,9 @@ OUT=$(mktemp -d)
 
 "$ROOT/Scripts/package_app.sh" release >/dev/null
 
-open -gj -n --stdout "$OUT/summary.json" --stderr "$OUT/telemetry.jsonl" "$APP" --args --ui-probe
+# CAMBAR_LOW_POWER_MODE=1 Scripts/ui_probe.sh tests Low Power Mode's cold opens.
+open -gj -n ${CAMBAR_LOW_POWER_MODE:+--env CAMBAR_LOW_POWER_MODE="$CAMBAR_LOW_POWER_MODE"} \
+  --stdout "$OUT/summary.json" --stderr "$OUT/telemetry.jsonl" "$APP" --args --ui-probe
 stole_focus=0
 for _ in {1..180}; do  # 90 seconds at most
   lsappinfo info -only name "$(lsappinfo front)" | grep -q '"CamBar"' && stole_focus=1

@@ -23,6 +23,10 @@ Purpose: one-stop shop for agents to develop + debug CamBar fast.
   - while no surface is visible, keep receiving but do not decode: hold only
     the compressed frames since the last keyframe. On open, decode those
     without output and show the newest, then continue live
+  - in macOS Low Power Mode nothing streams while the menu is closed; opening
+    connects from cold (about 1 to 2 s) and closing disconnects. Josh chose
+    this as his battery switch. `CAMBAR_LOW_POWER_MODE=1` simulates it for
+    `--probe` and `Scripts/ui_probe.sh`
   - retain only the newest decoded frame; never accumulate a playback queue
   - normal playback must not use go2rtc, WebKit, ffmpeg, HLS files or AVPlayer
   - old fallback playback paths should be deleted, not preserved

@@ -435,6 +435,14 @@ final class CamBarTests: XCTestCase {
         XCTAssertEqual(packet, Data([0, 0, 0, 2, 0x65, 0x05]))
     }
 
+    func testStreamStaysWarmUnlessLowPowerModeAndNobodyIsLooking() {
+        XCTAssertTrue(StreamWarmthPolicy.shouldStream(appStarted: true, asleep: false, lowPowerMode: false, viewed: false))
+        XCTAssertFalse(StreamWarmthPolicy.shouldStream(appStarted: true, asleep: false, lowPowerMode: true, viewed: false))
+        XCTAssertTrue(StreamWarmthPolicy.shouldStream(appStarted: true, asleep: false, lowPowerMode: true, viewed: true))
+        XCTAssertFalse(StreamWarmthPolicy.shouldStream(appStarted: true, asleep: true, lowPowerMode: false, viewed: true))
+        XCTAssertFalse(StreamWarmthPolicy.shouldStream(appStarted: false, asleep: false, lowPowerMode: false, viewed: false))
+    }
+
     func testCachedFramesAreOnlyReplayedWhileReceptionIsCurrent() {
         XCTAssertTrue(NativeFrameFreshness.canReplayCachedFrames(now: 10, lastReceivedAt: 9.5))
         XCTAssertFalse(NativeFrameFreshness.canReplayCachedFrames(now: 10, lastReceivedAt: 8.9))

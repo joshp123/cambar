@@ -195,12 +195,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     }
 
     private func streamStateDidChange(_ state: CameraStreamController.State) {
-        switch state {
-        case .waitingToRetry, .stopped, .suspended:
-            uiState.cameraUnavailable = true
-        case .connecting, .ready:
-            uiState.cameraUnavailable = false
-        }
+        uiState.cameraUnavailable = state.meansCameraUnavailable
     }
 
     private func retry() {

@@ -84,6 +84,19 @@ public enum NativeStreamRetryPolicy {
     }
 }
 
+public enum StreamWarmthPolicy {
+    /// Normally the stream stays warm so opening is instant. In Low Power Mode
+    /// it runs only while someone is looking.
+    public static func shouldStream(
+        appStarted: Bool,
+        asleep: Bool,
+        lowPowerMode: Bool,
+        viewed: Bool
+    ) -> Bool {
+        appStarted && !asleep && (viewed || !lowPowerMode)
+    }
+}
+
 public enum NativeStreamFallbackPolicy {
     /// Showing video this stale is worse than showing less detail.
     public static let maximumSecondsBehind: TimeInterval = 3

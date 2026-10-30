@@ -78,6 +78,14 @@ final class CameraStreamController {
         case ready
         case waitingToRetry(delay: TimeInterval)
         case suspended
+
+        /// Suspended is deliberate (sleep, Low Power Mode), not a failure.
+        var meansCameraUnavailable: Bool {
+            switch self {
+            case .waitingToRetry, .stopped: true
+            case .connecting, .ready, .suspended: false
+            }
+        }
     }
 
     struct ObservationToken: Hashable {
@@ -106,6 +114,16 @@ final class CameraStreamController {
     private var lifecycleCommandID: UInt64 = 0
     private var activeGeneration: String?
     private var activeViewers: Set<String> = []
+    private var isStarted = false
+    private var isAsleep = false
+    private var isStreaming = false
+    /// `CAMBAR_LOW_POWER_MODE=1` lets agents test this without changing the
+    /// Mac's setting, which needs an administrator.
+    private static let lowPowerModeOverride = ProcessInfo.processInfo
+        .environment["CAMBAR_LOW_POWER_MODE"].map { $0 == "1" }
+    private(set) var isLowPowerMode = lowPowerModeOverride
+        ?? ProcessInfo.processInfo.isLowPowerModeEnabled
+    private var powerStateObserver: NSObjectProtocol?
     private var viewingCommandID: UInt64 = 0
     private let networkMonitor = NWPathMonitor()
     private var networkSummary: String?
@@ -131,6 +149,43 @@ final class CameraStreamController {
             MainActor.assumeIsolated { self?.networkChanged(summary) }
         }
         networkMonitor.start(queue: .main)
+        powerStateObserver = NotificationCenter.default.addObserver(
+            forName: Notification.Name.NSProcessInfoPowerStateDidChange,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated { self?.powerStateChanged() }
+        }
+    }
+
+    private func powerStateChanged() {
+        let lowPowerMode = Self.lowPowerModeOverride ?? ProcessInfo.processInfo.isLowPowerModeEnabled
+        guard lowPowerMode != isLowPowerMode else { return }
+        isLowPowerMode = lowPowerMode
+        reconcileStreaming(reason: lowPowerMode ? "low power mode on" : "low power mode off")
+    }
+
+    /// Low Power Mode trades instant opening for no stream while the menu is
+    /// closed: opening then connects from cold, in about 2 s.
+    private func reconcileStreaming(reason: String) {
+        let shouldStream = StreamWarmthPolicy.shouldStream(
+            appStarted: isStarted,
+            asleep: isAsleep,
+            lowPowerMode: isLowPowerMode,
+            viewed: !activeViewers.isEmpty
+        )
+        guard shouldStream != isStreaming, !isPermanentlyStopped else { return }
+        isStreaming = shouldStream
+        DirectStreamTelemetry.record(
+            component: "stream",
+            event: shouldStream ? "streaming_started" : "streaming_paused",
+            detail: "reason=\(reason) low_power_mode=\(isLowPowerMode)"
+        )
+        if shouldStream {
+            runWorker()
+        } else {
+            pauseWorker()
+        }
     }
 
     /// `en0=192.168.1.20/24`: an interface with its IPv4 addresses, so a log
@@ -168,7 +223,11 @@ final class CameraStreamController {
     }
 
     func start() {
-        guard !isPermanentlyStopped else { return }
+        isStarted = true
+        reconcileStreaming(reason: "launch")
+    }
+
+    private func runWorker() {
         lifecycleCommandID &+= 1
         let commandID = lifecycleCommandID
         if supervisorTask != nil {
@@ -186,17 +245,28 @@ final class CameraStreamController {
     }
 
     func retryNow() {
-        guard !isPermanentlyStopped else { return }
+        guard !isPermanentlyStopped, isStreaming else { return }
         lifecycleCommandID &+= 1
         let commandID = lifecycleCommandID
         if supervisorTask == nil {
-            start()
+            runWorker()
         } else {
             Task { await worker.retryNow(commandID: commandID) }
         }
     }
 
     func suspendForSleep() {
+        isAsleep = true
+        reconcileStreaming(reason: "sleep")
+    }
+
+    func resumeAfterWake() {
+        isAsleep = false
+        Task { await worker.networkChanged() }  // Waking often means a new network.
+        reconcileStreaming(reason: "wake")
+    }
+
+    private func pauseWorker() {
         latestFrame = nil
         videoSize = nil
         notifyFrameCleared()
@@ -205,15 +275,14 @@ final class CameraStreamController {
         Task { await worker.setDesiredRunning(false, commandID: commandID) }
     }
 
-    func resumeAfterWake() {
-        guard !isPermanentlyStopped else { return }
-        start()
-    }
 
     func shutdown() {
         guard !isPermanentlyStopped else { return }
         isPermanentlyStopped = true
         networkMonitor.cancel()
+        if let powerStateObserver {
+            NotificationCenter.default.removeObserver(powerStateObserver)
+        }
         latestFrame = nil
         videoSize = nil
         notifyFrameCleared()
@@ -240,6 +309,7 @@ final class CameraStreamController {
         let commandID = viewingCommandID
         let viewed = !activeViewers.isEmpty
         Task { await worker.setViewed(viewed, commandID: commandID) }
+        reconcileStreaming(reason: viewed ? "opened" : "closed")
     }
 
     /// Agent test hook: take the fallback path without needing a bad link.
@@ -489,11 +559,7 @@ private actor CameraStreamWorker {
         latestLifecycleCommandID = commandID
         desiredRunning = running
         backoffTask?.cancel()
-        if running {
-            fallbackSince = nil  // Waking often means a different network.
-        }
         if !running {
-            DirectStreamTelemetry.record(component: "stream", event: "sleep_suspended")
             await activeSession?.abort()
         }
     }

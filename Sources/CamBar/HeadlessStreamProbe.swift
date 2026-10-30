@@ -47,16 +47,21 @@ enum HeadlessStreamProbe {
             var summary: [String: Any] = [
                 "camera": StreamSourceResolver.redactRtspCredentials(in: sourceURL),
                 "hidden_seconds": seconds,
+                "low_power_mode": stream.isLowPowerMode,
             ]
-            while firstFrameAt == nil, uptime - startedAt < max(seconds, 15) {
-                try? await Task.sleep(for: .milliseconds(50))
+            // In Low Power Mode nothing streams while hidden, so every reveal
+            // below is a cold open.
+            if !stream.isLowPowerMode {
+                while firstFrameAt == nil, uptime - startedAt < max(seconds, 15) {
+                    try? await Task.sleep(for: .milliseconds(50))
+                }
+                guard let firstFrameAt else {
+                    summary["result"] = "no_video"
+                    summary["retries"] = retryCount
+                    finish(summary, stream: stream, exitCode: 1)
+                }
+                summary["first_frame_ms"] = Int((firstFrameAt - startedAt) * 1_000)
             }
-            guard let firstFrameAt else {
-                summary["result"] = "no_video"
-                summary["retries"] = retryCount
-                finish(summary, stream: stream, exitCode: 1)
-            }
-            summary["first_frame_ms"] = Int((firstFrameAt - startedAt) * 1_000)
 
             let hiddenStart = ProcessResourceUsage.sample()
             try? await Task.sleep(for: .seconds(seconds))
@@ -71,7 +76,7 @@ enum HeadlessStreamProbe {
                 let baseline = stream.latestSequence
                 let revealedAt = uptime
                 stream.setViewer(viewer, active: true)
-                while stream.latestSequence <= baseline, uptime - revealedAt < 3 {
+                while stream.latestSequence <= baseline, uptime - revealedAt < 10 {
                     try? await Task.sleep(for: .milliseconds(1))
                 }
                 revealMilliseconds.append(Int((uptime - revealedAt) * 1_000))

@@ -53,10 +53,10 @@ enum OffscreenSurfaceProbe {
         let videoSize = CGSize(width: 1344, height: 760)
         let state = CamBarUIState(videoSize: videoSize)
         stream.onFallbackStreamHeightChange = { state.fallbackStreamHeight = $0 }
+        var unavailableShownWhileOpen = false
         stream.onStateChange = { streamState in
-            if case .ready = streamState {
-                state.cameraUnavailable = false
-            }
+            state.cameraUnavailable = streamState.meansCameraUnavailable
+            if state.cameraUnavailable, playback.isShowing { unavailableShownWhileOpen = true }
         }
         let contentSize = ContentView.contentSize(forVideoSize: videoSize)
         let window = NSWindow(
@@ -79,9 +79,14 @@ enum OffscreenSurfaceProbe {
         stream.start()
 
         Task { @MainActor in
-            var summary: [String: Any] = ["window_frame": NSStringFromRect(window.frame)]
-            while stream.state != .ready {
-                try? await Task.sleep(for: .milliseconds(50))
+            var summary: [String: Any] = [
+                "window_frame": NSStringFromRect(window.frame),
+                "low_power_mode": stream.isLowPowerMode,
+            ]
+            if !stream.isLowPowerMode {
+                while stream.state != .ready {
+                    try? await Task.sleep(for: .milliseconds(50))
+                }
             }
             try? await Task.sleep(for: .seconds(4))  // Let the stream settle hidden.
 
@@ -103,6 +108,7 @@ enum OffscreenSurfaceProbe {
             }
             summary["open_to_live_ms"] = openMilliseconds.sorted()
             summary["opens_failed"] = openCount - openMilliseconds.count
+            summary["unavailable_shown_while_open"] = unavailableShownWhileOpen
 
             let switchID = "probe-switch"
             playback.show(openID: switchID, startedAt: ProcessInfo.processInfo.systemUptime)

@@ -16,6 +16,7 @@ final class CameraPlaybackController {
     private let surface: Surface
     private var observationToken: CameraStreamController.ObservationToken?
     private var isVisible = false
+    var isShowing: Bool { isVisible }
     private var isSuspended = false
     private var currentOpenID: String?
     private var openStartedAt: TimeInterval?
