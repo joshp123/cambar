@@ -77,7 +77,7 @@ CamBar needs 27.
    - `frame_heartbeat` every 5 s: `stream` (`main` or `fallback`),
      `real_time_ratio` (video seconds received per wall second), `seconds_behind`
      (cumulative slip this session; 3 triggers fallback), `cpu_percent`, `memory_mb`, `encoded_kbps`, frame counts.
-     Main needs about 4 Mbit/s and the substream under 1 Mbit/s.
+     Main needs about 4.5 Mbit/s by day and up to 6 at night; the substream under 1 Mbit/s.
    - `stream_switched`: a move between main and the substream, with the reason.
    - `live_view.elapsed_ms`: click-to-live time.
 4. `Scripts/ui_probe.sh` for presentation code. It runs the real popover
@@ -135,7 +135,7 @@ under 500 ms.
 
 Measured 30-31 Oct 2026, hidden, stream keeping up (`real_time_ratio` near 1),
 all on efficiency cores:
-- main at 4 Mbit/s: 1.3% in the release probe; the app overnight was 2.9%
+- main at 4 Mbit/s (cap 4096 then): 1.3% in the release probe; the app overnight was 2.9%
   median before the depacketiser fix below, so expect about 2.3%
 - substream at 0.7 Mbit/s: 0.7%
 - open to live view: 74 to 125 ms with the real surface
@@ -158,10 +158,14 @@ blowouts drove the rewrite away from ffmpeg and WebKit, so treat a miss as a
 bug.
 
 ## Camera settings (not in this repo)
-Main: H.265, 2688x1520, 25 fps, VBR max 4096 kbit/s, keyframe every 2 s, Smart
-Codec off. 4096 was chosen by SSIM and PSNR against a reference: it beats the old
-H.264 at 6144 in every region, and 3072 did not (`ssh mac-mini
-'~/cambar-quality/compare'` reruns the comparison). Sub: H.265, 1280x720, 25 fps, VBR max 1024 kbit/s, keyframe every
+Main: H.265, 2688x1520, 25 fps, VBR max 6144 kbit/s, keyframe every 2 s, Smart
+Codec off. Chosen by SSIM and PSNR of static regions against a high-bitrate
+reference, by day and by night (`ssh mac-mini '~/cambar-quality/compare'`
+reruns it; results in `~/cambar-quality/runs/`). At night 4096 beat the old
+H.264 at 6144, but in daylight on 31 Oct it fell short in every region, worst
+on the left-hand texture. H.265 at 6144 beat the old H.264 everywhere by day
+(SSIM 0.992 vs 0.985) at about the same measured bitrate (4.5 vs 4.3 Mbit/s).
+Moving areas are masked out, so motion is not scored. Sub: H.265, 1280x720, 25 fps, VBR max 1024 kbit/s, keyframe every
 2 s. Keep Smart Codec off: it stretches keyframe spacing and slows first frame.
 
 ## Fast failure classification
