@@ -79,7 +79,10 @@ public enum NativeFrameCadence {
 
 public enum NativeStreamRetryPolicy {
     public static func delay(afterFailure failureCount: Int) -> TimeInterval {
-        let delays: [TimeInterval] = [0.1, 0.5, 2, 5]
+        // Quick at first; then a camera that stays unreachable (away from home
+        // with no route) costs one attempt a minute. Opening the menu, waking
+        // and a network change still retry at once.
+        let delays: [TimeInterval] = [0.1, 0.5, 2, 5, 10, 20, 40, 60]
         return delays[min(max(failureCount, 1) - 1, delays.count - 1)]
     }
 }

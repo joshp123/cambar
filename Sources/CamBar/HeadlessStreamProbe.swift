@@ -16,6 +16,11 @@ enum HeadlessStreamProbe {
 
     static func run(seconds: TimeInterval) -> Never {
         DirectStreamTelemetry.writesToStandardErrorInsteadOfLogFile = true
+        final class LastRoute: @unchecked Sendable { var value: String? }
+        let lastRoute = LastRoute()
+        DirectStreamTelemetry.observer = { event, _, _, detail in
+            if event == "route_chosen" { lastRoute.value = detail?.replacingOccurrences(of: "route=", with: "") }
+        }
         guard let sourceURL = StreamSourceResolver.resolveRtspURL() else {
             printSummary(["result": "no_camera_configured"])
             exit(1)
@@ -58,6 +63,7 @@ enum HeadlessStreamProbe {
                 guard let firstFrameAt else {
                     summary["result"] = "no_video"
                     summary["retries"] = retryCount
+                    summary["route"] = lastRoute.value
                     finish(summary, stream: stream, exitCode: 1)
                 }
                 summary["first_frame_ms"] = Int((firstFrameAt - startedAt) * 1_000)
@@ -102,6 +108,7 @@ enum HeadlessStreamProbe {
             )
             summary["viewing_fps"] = Int((Double(frameCount - viewingFrom) / viewingSeconds).rounded())
             summary["retries"] = retryCount
+            summary["route"] = lastRoute.value
             summary["result"] = isLive ? "live" : "stalled"
             if let lastFrame {
                 summary["width"] = Int(lastFrame.size.width)

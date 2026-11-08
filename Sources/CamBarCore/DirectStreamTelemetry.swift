@@ -14,7 +14,7 @@ public enum DirectStreamTelemetry {
     nonisolated(unsafe) public static var writesToStandardErrorInsteadOfLogFile = false
 
     /// Lets the off-screen probe react to events it would otherwise only log.
-    nonisolated(unsafe) public static var observer: (@Sendable (_ event: String, _ openID: String?, _ elapsedMilliseconds: Int?) -> Void)?
+    nonisolated(unsafe) public static var observer: (@Sendable (_ event: String, _ openID: String?, _ elapsedMilliseconds: Int?, _ detail: String?) -> Void)?
 
     public static let logURL = FileManager.default
         .urls(for: .cachesDirectory, in: .userDomainMask)[0]
@@ -36,7 +36,7 @@ public enum DirectStreamTelemetry {
         elapsedMilliseconds: Int? = nil,
         detail: String? = nil
     ) {
-        observer?(event, openID, elapsedMilliseconds)
+        observer?(event, openID, elapsedMilliseconds, detail)
         let occurredAt = Date()
         let occurredUptimeMilliseconds = Int(ProcessInfo.processInfo.systemUptime * 1_000)
         let safeDetail = detail.map(StreamSourceResolver.redactRtspCredentials(in:))
@@ -115,7 +115,9 @@ public enum DirectStreamTelemetry {
             at: logURL.deletingLastPathComponent(),
             withIntermediateDirectories: true
         )
-        let size = (try? logURL.resourceValues(forKeys: [.fileSizeKey]).fileSize).map(UInt64.init) ?? 0
+        // Read the size from disk each time: URL resource values are cached on
+        // the URL instance, so they would report the size at first read forever.
+        let size = (try? FileManager.default.attributesOfItem(atPath: logURL.path)[.size] as? UInt64) ?? 0
         if size >= maximumLogBytes {
             retainNewestHalfOfLog()
         }

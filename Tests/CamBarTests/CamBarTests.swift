@@ -405,11 +405,26 @@ final class CamBarTests: XCTestCase {
         ))
     }
 
-    func testNativeRetryPolicyIsFastThenBounded() {
+    func testNativeRetryPolicyIsFastThenBacksOffToAMinute() {
         XCTAssertEqual(NativeStreamRetryPolicy.delay(afterFailure: 1), 0.1)
-        XCTAssertEqual(NativeStreamRetryPolicy.delay(afterFailure: 2), 0.5)
-        XCTAssertEqual(NativeStreamRetryPolicy.delay(afterFailure: 3), 2)
-        XCTAssertEqual(NativeStreamRetryPolicy.delay(afterFailure: 20), 5)
+        XCTAssertEqual(NativeStreamRetryPolicy.delay(afterFailure: 4), 5)
+        XCTAssertEqual(NativeStreamRetryPolicy.delay(afterFailure: 8), 60)
+        XCTAssertEqual(NativeStreamRetryPolicy.delay(afterFailure: 500), 60)
+    }
+
+    func testCameraIsOnTheLocalNetworkOnlyInsideTheInterfaceSubnet() {
+        let homeWiFi = IPv4Network(address: IPv4Network.parse("192.168.1.130")!, prefixLength: 24)
+        XCTAssertTrue(homeWiFi.contains("192.168.1.249"))
+        XCTAssertFalse(homeWiFi.contains("192.168.2.249"))
+        XCTAssertFalse(homeWiFi.contains("camera.local"))
+        let mobileNetwork = IPv4Network(address: IPv4Network.parse("192.0.0.2")!, prefixLength: 32)
+        XCTAssertFalse(mobileNetwork.contains("192.168.1.249"))
+    }
+
+    func testTailscaleAddressesAreRecognised() {
+        XCTAssertTrue(TailscaleAddress.isTailscale(IPv4Network(address: IPv4Network.parse("100.117.45.44")!, prefixLength: 32)))
+        XCTAssertFalse(TailscaleAddress.isTailscale(IPv4Network(address: IPv4Network.parse("100.128.0.1")!, prefixLength: 32)))
+        XCTAssertFalse(TailscaleAddress.isTailscale(IPv4Network(address: IPv4Network.parse("192.168.1.130")!, prefixLength: 24)))
     }
 
     func testAVCCPacketizerRestoresLengthPrefixesExactlyOnce() {

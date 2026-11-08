@@ -38,7 +38,7 @@ enum OffscreenSurfaceProbe {
         DirectStreamTelemetry.writesToStandardErrorInsteadOfLogFile = true
         app.setActivationPolicy(.prohibited)
         let liveViews = LiveViewTimes()
-        DirectStreamTelemetry.observer = { event, openID, elapsed in
+        DirectStreamTelemetry.observer = { event, openID, elapsed, _ in
             if event == "live_view", let openID, let elapsed {
                 liveViews.record(openID: openID, milliseconds: elapsed)
             }

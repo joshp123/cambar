@@ -15,6 +15,19 @@ Purpose: one-stop shop for agents to develop + debug CamBar fast.
 ## What CamBar is
 - Tiny macOS menubar RTSP viewer.
 - Pipeline: RTSP camera → IPCamKit → hardware VideoToolbox decode → native video surface.
+- Route (`Sources/CamBar/CameraRoute.swift`), chosen at the start of every
+  session:
+  - direct over the home network when an interface is on the camera's subnet
+    and the device answering there presents the camera's HTTPS certificate.
+    The certificate is learned only through Tailscale, the one authenticated
+    path, and stored in UserDefaults (`cameraCertificateSHA256.<host>`)
+  - otherwise through Tailscale, pinned to the `utun` interface, so a hotel or
+    Airbnb network that reuses 192.168.1.0/24 never receives the camera login
+  - a network change is acted on only after it settles for 2 s, and only if the
+    route changed or there is no working session; flapping interfaces never cut
+    a working stream
+  - retries back off 0.1, 0.5, 2, 5, 10, 20, 40, then every 60 s; opening the
+    menu, waking and a settled network change retry at once
 - Stream policy:
   - the main stream `/Streaming/Channels/101` is warmed at launch/login
   - one stream runs at a time; when main slips 3 s behind real time, or fails
@@ -52,12 +65,12 @@ camera's LAN, good for ffmpeg and network checks, but it runs macOS 26 and
 CamBar needs 27.
 
 1. `swift test` for the reducers, parsers and frame policy.
-2. `CamBar --probe [seconds]` for the stream pipeline: the same
+2. `CamBar --probe [seconds]` for the stream pipeline and route: the same
    `CameraStreamController` and VideoToolbox decoder as the app, with no UI and
    no effect on the running app. stderr is the telemetry; stdout is one JSON
    line (`result`: `live`, `stalled`, `no_video` or `no_camera_configured`;
    `first_frame_ms`, `hidden_cpu_percent`, `reveal_ms`, `viewing_fps`,
-   `viewing_cpu_percent`, size, `retries`). It stays hidden for `seconds`,
+   `viewing_cpu_percent`, size, `retries`, `route`). It stays hidden for `seconds`,
    measures five reveals, then watches for 5 s. It saves `reveal_png`, the first
    picture of a reveal, and `last_frame_png`, with `last_frame_decoded_at`.
    Open the PNG: the camera prints its clock top left, so the difference is
@@ -68,10 +81,14 @@ CamBar needs 27.
 3. The running app's log, `~/Library/Caches/CamBar/direct/direct-stream-events.jsonl`
    (also in `log show --predicate 'subsystem == "com.cambar"'`). Filter by the
    newest `launch` event's `session_id`. What to read:
-   - `network_changed`: interfaces up (`utun*` is Tailscale).
+   - `network_changed`: interfaces with their addresses (`utun*` is Tailscale).
+   - `route_chosen`: `direct`, `tailscale` or `system`, with the reason (for
+     example "camera certificate matches" or "device at … is not the camera").
+     `camera_certificate_learned` and `camera_certificate_changed` mark learning.
    - `rtsp diagnostic "TCP connected <local>(me)-><camera>"`: which address
      reached the camera. A `100.x` local address means Tailscale.
-   - `session_stopped`: the real failure, with `[interface=… local=…]` for
+   - `session_stopped`: the real failure ("camera did not answer within 5 s",
+     "no video for 5 s", or the socket error), with `[interface=… local=…]` for
      connection failures, plus duration, frame and byte counts and
      `last_packet_age_ms`. Framing errors include the next raw bytes.
    - `frame_heartbeat` every 5 s: `stream` (`main` or `fallback`),
@@ -129,9 +146,11 @@ RTSP resolution order:
 ## Resource target
 With the menu closed, CamBar stays at or under 3% of one CPU core and 150 MB,
 and `VTDecoderXPCService` stays at 0 because nothing is decoded.
-`frame_heartbeat` reports `cpu_percent` and `memory_mb`;
-`Scripts/deploy_app.sh` fails on the median of five heartbeats. Opening stays
-under 500 ms.
+`frame_heartbeat` reports `cpu_percent` and `memory_mb`. Opening stays under
+500 ms. `Scripts/deploy_app.sh` checks all three with the installed binary's
+probe, which runs whatever the Mac's power mode. On the direct route at home
+the release probe measures about 1.7% hidden at 5 to 6 Mbit/s, and Tailscale
+does no work for CamBar.
 
 Measured 30-31 Oct 2026, hidden, stream keeping up (`real_time_ratio` near 1),
 all on efficiency cores:
@@ -179,11 +198,12 @@ route -n get 192.168.1.249 | rg interface
 ```
 
 Interpretation:
-- away from home, the route must use a `utun` interface. If it says `en0`
-  and `nc` reports "Host is down", the local network also uses
-  192.168.1.0/24 and is winning. `josh-nas` advertises `192.168.1.249/32`
-  alongside the /24 for exactly this; check that route is still advertised
-  and approved
+- read `route_chosen` first. At home it should be `direct`; if it says
+  "certificate not learned yet" the next session after a Tailscale connection
+  goes direct. Away it should be `tailscale`
+- `nc -b en0 -zv 192.168.1.249 554` tests the direct path and
+  `nc -b utun6 -zv 192.168.1.249 554` the Tailscale path, whatever the routing
+  table prefers
 - ping fails -> routing/ACL/subnet-router problem
 - ping ok + port fails -> camera/RTSP path/firewall problem
 - ping ok + port ok + app fails -> CamBar RTSP/decode/presentation logic
@@ -192,11 +212,11 @@ Interpretation:
 - Subnet router != exit node.
 - CamBar needs reachability to camera `192.168.1.249:554`; exit node not required.
 - Known current topology: `josh-nas` advertises `192.168.1.0/24` and the
-  camera's `192.168.1.249/32`. The /32 is more specific than any hotel or
-  Airbnb network that also uses 192.168.1.0/24, so macOS sends camera traffic
-  through Tailscale everywhere, including at home (via the NAS).
+  camera's `192.168.1.249/32`. CamBar pins each connection to an interface,
+  so it does not depend on which route macOS prefers; the /32 keeps other
+  tools on a borrowed 192.168.1.0/24 network pointed at Tailscale.
 - Away from home the warm stream carries the camera bitrate over Tailscale
-  for as long as CamBar runs.
+  for as long as CamBar runs, unless Low Power Mode is on.
 - Helpful checks:
 ```bash
 tailscale debug prefs | jq '{WantRunning,RouteAll,ExitNodeID,ExitNodeAllowLANAccess}'
@@ -205,7 +225,8 @@ route -n get 192.168.1.249 | rg 'interface|gateway|flags'
 
 ## Done criteria before handoff
 - `swift test` passes and `CamBar --probe` reports `live`.
-- `./Scripts/deploy_app.sh` reports live video and no unsolicited UI.
+- `./Scripts/deploy_app.sh` reports live video within the targets and no
+  unsolicited UI.
 - Presentation changes only: Josh confirms the popover and popout.
 - No secret leakage in diffs/log statements.
 - Summary includes root cause, fix, and how it was verified.

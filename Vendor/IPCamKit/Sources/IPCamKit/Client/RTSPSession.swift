@@ -112,6 +112,7 @@ public final class RTSPClientSession: Sendable {
   private let url: String
   private let credentials: Credentials?
   private let transport: Transport
+  private let requiredInterface: NWInterface?
   private let userAgent: String
   private let onDiagnostic: (@Sendable (RTSPDiagnostic) -> Void)?
   private let state: SessionState
@@ -123,11 +124,13 @@ public final class RTSPClientSession: Sendable {
     url: String,
     credentials: Credentials? = nil,
     transport: Transport = .tcp,
+    requiredInterface: NWInterface? = nil,
     userAgent: String = "IPCamKit",
     onDiagnostic: (@Sendable (RTSPDiagnostic) -> Void)? = nil
   ) {
     self.init(
       url: url, credentials: credentials, transport: transport,
+      requiredInterface: requiredInterface,
       userAgent: userAgent, onDiagnostic: onDiagnostic, keepaliveInterval: nil)
   }
 
@@ -137,6 +140,7 @@ public final class RTSPClientSession: Sendable {
     url: String,
     credentials: Credentials?,
     transport: Transport,
+    requiredInterface: NWInterface? = nil,
     userAgent: String,
     onDiagnostic: (@Sendable (RTSPDiagnostic) -> Void)?,
     keepaliveInterval: Duration?
@@ -144,6 +148,7 @@ public final class RTSPClientSession: Sendable {
     self.url = url
     self.credentials = credentials
     self.transport = transport
+    self.requiredInterface = requiredInterface
     self.userAgent = userAgent
     self.onDiagnostic = onDiagnostic
     self.keepaliveInterval = keepaliveInterval
@@ -158,6 +163,7 @@ public final class RTSPClientSession: Sendable {
       url: url,
       credentials: credentials,
       transport: transport,
+      requiredInterface: requiredInterface,
       userAgent: userAgent,
       onDiagnostic: onDiagnostic,
       keepaliveInterval: keepaliveInterval
@@ -395,6 +401,7 @@ actor SessionState {
     url: String,
     credentials: Credentials?,
     transport: Transport,
+    requiredInterface: NWInterface?,
     userAgent: String,
     onDiagnostic: (@Sendable (RTSPDiagnostic) -> Void)?,
     keepaliveInterval: Duration? = nil
@@ -426,7 +433,7 @@ actor SessionState {
     // Publish the connection before the first suspension so abort() can cancel
     // a half-open TCP connection or a silent pre-PLAY request.
     connection = conn
-    try await conn.connect(host: host, port: port)
+    try await conn.connect(host: host, port: port, requiredInterface: requiredInterface)
     onDiagnostic?(RTSPDiagnostic(severity: .info, message: "TCP connected \(await conn.ctx)"))
 
     // OPTIONS (best-effort): discover whether the server supports

@@ -30,46 +30,33 @@ codesign --verify --deep --strict "$APP"
 previous_session=$(jq -r 'select(.event == "launch") | .session_id' "$LOG" 2>/dev/null | tail -n 1 || true)
 open -gj "$APP"
 
+# The app must start and open nothing by itself.
 session=""
-first_frame=""
-for _ in {1..30}; do
+for _ in {1..20}; do
   sleep 0.5
   session=$(jq -r 'select(.event == "launch") | .session_id' "$LOG" 2>/dev/null | tail -n 1 || true)
-  [[ -n "$session" && "$session" != "$previous_session" ]] || continue
-  first_frame=$(jq -r --arg s "$session" \
-    'select(.session_id == $s and .event == "first_frame") | .elapsed_ms' "$LOG" | head -n 1)
-  [[ -n "$first_frame" ]] && break
+  [[ -n "$session" && "$session" != "$previous_session" ]] && break
 done
 [[ -n "$session" && "$session" != "$previous_session" ]] || fail "CamBar did not start"
-
+sleep 3
 if jq -e --arg s "$session" 'select(.session_id == $s and
     (.event | test("^(menu_open_requested|menu_did_show|window_open_requested)$")))' "$LOG" >/dev/null; then
   pkill -KILL -f "$EXECUTABLE"
   fail "CamBar opened UI without a click and was stopped"
 fi
-
 echo "Installed and restarted $APP ($(git rev-parse --short HEAD))."
-if [[ -z "$first_frame" ]]; then
-  echo "ERROR: CamBar is running but showed no video within 15 s. Last stream event:" >&2
-  jq -r --arg s "$session" 'select(.session_id == $s and .component == "stream") | "\(.event) \(.detail // "")"' "$LOG" | tail -n 1 >&2
-  exit 1
-fi
-echo "Live video after ${first_frame} ms."
 
-# Resource target with the menu closed (Josh: never "ownzone" the CPU again):
-# at most 3% of one core and 150 MB. Hidden, nothing is decoded, so this is the
-# whole cost. Use the median of five heartbeats, skipping the first.
-heartbeats=""
-for _ in {1..40}; do
-  sleep 1
-  heartbeats=$(jq -r --arg s "$session" \
-    'select(.session_id == $s and .event == "frame_heartbeat") | .detail' "$LOG" | sed -n 2,6p)
-  [[ $(wc -l <<<"$heartbeats") -ge 5 ]] && break
-done
-[[ -n "$heartbeats" ]] || fail "no frame heartbeat to measure resources"
-median() { sort -n | awk '{ v[NR] = $1 } END { print v[int((NR + 1) / 2)] }'; }
-cpu=$(sed -E 's/.*cpu_percent=([0-9.]+).*/\1/' <<<"$heartbeats" | median)
-memory=$(sed -E 's/.*memory_mb=([0-9]+).*/\1/' <<<"$heartbeats" | median)
-echo "Warm stream: ${cpu}% CPU, ${memory} MB (median of $(wc -l <<<"$heartbeats" | tr -d ' ') heartbeats)."
-awk -v c="$cpu" -v m="$memory" 'BEGIN { exit !(c <= 3 && m <= 150) }' \
-  || fail "resource target missed: ${cpu}% CPU (max 3), ${memory} MB (max 150)"
+# Check the stream with the installed binary's headless probe: the same code
+# as the app, measured the same way whatever the Mac's power mode. Targets
+# (Josh: never "ownzone" the CPU again): menu closed at most 3% of one core and
+# 150 MB; opening shows live video in under 500 ms.
+probe=$(CAMBAR_LOW_POWER_MODE=0 "$EXECUTABLE" --probe 20 2>/dev/null) || true
+[[ -n "$probe" ]] || fail "probe produced no summary"
+result=$(jq -r .result <<<"$probe")
+cpu=$(jq -r '.hidden_cpu_percent // 99' <<<"$probe")
+memory=$(jq -r '.memory_mb // 9999' <<<"$probe")
+open_ms=$(jq -r '.reveal_ms // [9999] | sort | .[length / 2 | floor]' <<<"$probe")
+echo "Route $(jq -r .route <<<"$probe"); live: $result; menu closed: ${cpu}% CPU, ${memory} MB; open to live: ${open_ms} ms (median of five)."
+[[ "$result" == "live" ]] || fail "no live video"
+awk -v c="$cpu" -v m="$memory" -v o="$open_ms" 'BEGIN { exit !(c <= 3 && m <= 150 && o <= 500) }' \
+  || fail "target missed: ${cpu}% CPU (max 3), ${memory} MB (max 150), ${open_ms} ms to live (max 500)"

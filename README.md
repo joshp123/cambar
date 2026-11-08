@@ -21,7 +21,7 @@ written_by: ai
 
 ## What it does
 
-CamBar reads your RTSP URL from `CAMBAR_RTSP_URL` or `~/.config/camsnap/config.yaml`. At launch it opens one RTSP session and keeps only the compressed frames since the last keyframe. Opening a camera surface decodes those with VideoToolbox in milliseconds, shows the newest and carries on live, so nothing is decoded while no one is watching. If the link cannot carry the main stream, it falls back to the camera's substream and tries main again later. In Low Power Mode it streams only while the menu is open. There is no transcoding, browser process, local HTTP server, disk segment cache or duplicate camera connection.
+CamBar reads your RTSP URL from `CAMBAR_RTSP_URL` or `~/.config/camsnap/config.yaml`. At launch it opens one RTSP session and keeps only the compressed frames since the last keyframe. Opening a camera surface decodes those with VideoToolbox in milliseconds, shows the newest and carries on live, so nothing is decoded while no one is watching. At home it connects to the camera directly, once the camera proves itself with its certificate; away it goes through Tailscale. If the link cannot carry the main stream, it falls back to the camera's substream and tries main again later. In Low Power Mode it streams only while the menu is open. There is no transcoding, browser process, local HTTP server, disk segment cache or duplicate camera connection.
 
 ## Why
 

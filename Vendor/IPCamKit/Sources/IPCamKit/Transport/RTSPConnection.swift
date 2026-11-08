@@ -60,12 +60,16 @@ actor RTSPTransportConnection {
   }
 
   /// Connect to an RTSP server.
-  func connect(host: String, port: UInt16) async throws {
+  /// `requiredInterface` pins the connection to one interface, so its
+  /// interface-scoped route is used whatever the main routing table prefers.
+  func connect(host: String, port: UInt16, requiredInterface: NWInterface? = nil) async throws {
     let nwHost = NWEndpoint.Host(host)
     guard let nwPort = NWEndpoint.Port(rawValue: port) else {
       throw RTSPError.connectionFailed("Invalid port \(port)")
     }
-    let conn = NWConnection(host: nwHost, port: nwPort, using: .tcp)
+    let parameters = NWParameters.tcp
+    parameters.requiredInterface = requiredInterface
+    let conn = NWConnection(host: nwHost, port: nwPort, using: parameters)
 
     self.connection = conn
 

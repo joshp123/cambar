@@ -114,6 +114,7 @@ final class CameraStreamController {
     private var lifecycleCommandID: UInt64 = 0
     private var activeGeneration: String?
     private var activeViewers: Set<String> = []
+    private var settledNetworkChangeTask: Task<Void, Never>?
     private var isStarted = false
     private var isAsleep = false
     private var isStreaming = false
@@ -144,8 +145,12 @@ final class CameraStreamController {
             }
         }
         networkMonitor.pathUpdateHandler = { [weak self] path in
-            let names = Array(Set(path.availableInterfaces.map(\.name))).sorted()
-            let summary = "status=\(path.status) interfaces=\(names.map(CameraStreamController.describeInterface).joined(separator: ","))"
+            // Only interfaces with an address can carry the stream.
+            let addressed = Array(Set(path.availableInterfaces.map(\.name))).sorted().compactMap { name in
+                let networks = InterfaceAddresses.ipv4(of: name)
+                return networks.isEmpty ? nil : "\(name)=" + networks.map(\.description).joined(separator: "+")
+            }
+            let summary = "status=\(path.status) interfaces=\(addressed.joined(separator: ","))"
             MainActor.assumeIsolated { self?.networkChanged(summary) }
         }
         networkMonitor.start(queue: .main)
@@ -188,37 +193,20 @@ final class CameraStreamController {
         }
     }
 
-    /// `en0=192.168.1.20/24`: an interface with its IPv4 addresses, so a log
-    /// shows when the local network overlaps the camera's.
-    nonisolated static func describeInterface(_ name: String) -> String {
-        var addresses: [String] = []
-        var head: UnsafeMutablePointer<ifaddrs>?
-        guard getifaddrs(&head) == 0 else { return name }
-        defer { freeifaddrs(head) }
-        var cursor = head
-        while let entry = cursor?.pointee {
-            defer { cursor = entry.ifa_next }
-            guard String(cString: entry.ifa_name) == name,
-                  let address = entry.ifa_addr, address.pointee.sa_family == UInt8(AF_INET),
-                  let netmask = entry.ifa_netmask else { continue }
-            let ip = address.withMemoryRebound(to: sockaddr_in.self, capacity: 1) { $0.pointee.sin_addr }
-            let mask = netmask.withMemoryRebound(to: sockaddr_in.self, capacity: 1) { $0.pointee.sin_addr.s_addr }
-            addresses.append("\(String(cString: inet_ntoa(ip)))/\(mask.nonzeroBitCount)")
-        }
-        return addresses.isEmpty ? name : "\(name)=\(addresses.joined(separator: "+"))"
-    }
-
-    /// Log every network change. Retry now if the camera is not streaming, and
-    /// give main another chance if the link forced the substream.
+    /// Interfaces appear and vanish constantly on hotspots and VPNs, so wait
+    /// for the network to settle and let the worker decide whether the route to
+    /// the camera actually changed. A working session is never cut for nothing.
     private func networkChanged(_ summary: String) {
         guard summary != networkSummary else { return }
         let isFirstReport = networkSummary == nil
         networkSummary = summary
         DirectStreamTelemetry.record(component: "network", event: "network_changed", detail: summary)
         guard !isFirstReport, supervisorTask != nil else { return }
-        Task { await worker.networkChanged() }
-        if state != .ready {
-            retryNow()
+        settledNetworkChangeTask?.cancel()
+        settledNetworkChangeTask = Task { [worker] in
+            try? await Task.sleep(for: .seconds(2))
+            guard !Task.isCancelled else { return }
+            await worker?.networkChanged()
         }
     }
 
@@ -310,6 +298,10 @@ final class CameraStreamController {
         let viewed = !activeViewers.isEmpty
         Task { await worker.setViewed(viewed, commandID: commandID) }
         reconcileStreaming(reason: viewed ? "opened" : "closed")
+        // Someone is looking: do not make them wait out a retry delay.
+        if viewed, state != .ready {
+            retryNow()
+        }
     }
 
     /// Agent test hook: take the fallback path without needing a bad link.
@@ -421,6 +413,13 @@ private actor CameraStreamWorker {
     private var activeGenerationIsFallback = false
     private var pendingStreamSwitch: String?
     private var lagTracker = RealTimeLagTracker()
+    private let pathMonitor = NWPathMonitor()
+    private var activeRoute: CameraRoute?
+    private var certificateLearnedThisLaunch = false
+    private var rtspConnected = false
+    /// Why the watchdog cut the session, which says more than the error the
+    /// aborted socket reports.
+    private var watchdogStopReason: String?
     private var isViewed = false
     private var latestViewingCommandID: UInt64 = 0
     private var awaitingKeyframe = true
@@ -473,6 +472,7 @@ private actor CameraStreamWorker {
     ) {
         self.mainSourceURL = mainSourceURL
         self.fallbackSourceURL = fallbackSourceURL
+        pathMonitor.start(queue: DispatchQueue(label: "CamBar.camera-route"))
         self.onState = onState
         self.onFrame = onFrame
     }
@@ -499,6 +499,8 @@ private actor CameraStreamWorker {
                     throw StreamFailure.streamEnded
                 }
             } catch {
+                let failureReason = watchdogStopReason ?? "\(error)"
+                watchdogStopReason = nil
                 if let streamSwitch = pendingStreamSwitch {
                     pendingStreamSwitch = nil
                     await stopGeneration(reason: streamSwitch)
@@ -511,7 +513,7 @@ private actor CameraStreamWorker {
                     failureCount = 0
                     continue
                 }
-                await stopGeneration(reason: "\(error)")
+                await stopGeneration(reason: failureReason)
                 guard desiredRunning, !permanentlyStopped, !Task.isCancelled else { continue }
                 failureCount += 1
                 if fallbackSince == nil, fallbackSourceURL != nil,
@@ -536,7 +538,7 @@ private actor CameraStreamWorker {
                     event: "session_reconnecting",
                     videoSessionID: generation,
                     elapsedMilliseconds: Int(delay * 1_000),
-                    detail: "reason=\(error)"
+                    detail: "reason=\(failureReason)"
                 )
                 emitState(.waitingToRetry(delay: delay), generation: generation)
                 if delay > 0 {
@@ -575,12 +577,21 @@ private actor CameraStreamWorker {
         await activeSession?.abort()
     }
 
-    /// A new network may carry main again (arriving home, leaving a bad hotel).
+    /// A settled network change. Reconnect only when the route to the camera
+    /// changed (arriving home, leaving it) or when there is no working
+    /// session; then main gets another chance too.
     func networkChanged() async {
-        guard fallbackSince != nil else { return }
         fallbackSince = nil
-        guard activeGenerationIsFallback, activeSession != nil else { return }
-        pendingStreamSwitch = "network changed"
+        guard let activeRoute, activeSession != nil, let host = Self.resolveSource(mainSourceURL)?.host else {
+            skipNextBackoff = true
+            failureCount = 0
+            backoffTask?.cancel()
+            return
+        }
+        let route = await CameraRoute.choose(host: host, interfaces: pathMonitor.currentPath.availableInterfaces)
+        let routeChanged = route.kind != activeRoute.kind || route.interface?.name != activeRoute.interface?.name
+        guard routeChanged || activeGenerationIsFallback else { return }
+        pendingStreamSwitch = routeChanged ? "network changed, route now \(route)" : "network changed, trying main"
         await activeSession?.abort()
     }
 
@@ -706,10 +717,23 @@ private actor CameraStreamWorker {
             videoSessionID: generation,
             detail: "transport=\(transportName) stream=\(activeGenerationIsFallback ? "fallback" : "main") url=\(StreamSourceResolver.redactRtspCredentials(in: sourceURL))"
         )
+        let route = await CameraRoute.choose(
+            host: source.host,
+            interfaces: pathMonitor.currentPath.availableInterfaces
+        )
+        activeRoute = route
+        rtspConnected = false
+        DirectStreamTelemetry.record(
+            component: "route",
+            event: "route_chosen",
+            videoSessionID: generation,
+            detail: "route=\(route)"
+        )
         let session = RTSPClientSession(
             url: source.url,
             credentials: source.credentials,
             transport: transport,
+            requiredInterface: route.interface,
             userAgent: "CamBar",
             onDiagnostic: { diagnostic in
                 DirectStreamTelemetry.record(
@@ -728,6 +752,12 @@ private actor CameraStreamWorker {
         let description = try await session.start()
         guard let video = description.video else { throw StreamFailure.videoMissing }
         await session.setMinimumReadBytes(minimumReadBytes)
+        rtspConnected = true
+        if route.kind == .tailscale, let tailscale = route.interface,
+           !certificateLearnedThisLaunch || route.reason.contains("not the camera") {
+            certificateLearnedThisLaunch = true
+            Task { await CameraIdentity.learn(host: source.host, over: tailscale) }
+        }
         DirectStreamTelemetry.record(
             component: "rtsp",
             event: "connected",
@@ -958,6 +988,9 @@ private actor CameraStreamWorker {
         let lastProgress = isViewed || !firstFrameEmitted ? lastDecodedAt : lastCachedAt
         let progressAt = lastProgress ?? generationStartedAt ?? now
         if now - progressAt >= 5 {
+            watchdogStopReason = !rtspConnected
+                ? "camera did not answer within 5 s"
+                : firstFrameEmitted ? "no video for 5 s" : "no video within 5 s of connecting"
             DirectStreamTelemetry.record(
                 component: "stream",
                 event: "stream_stalled",
@@ -1110,11 +1143,12 @@ private actor CameraStreamWorker {
         let credentials = username.map {
             Credentials(username: $0, password: password ?? "")
         }
-        return ResolvedSource(url: url, credentials: credentials)
+        return ResolvedSource(url: url, host: components.host ?? "", credentials: credentials)
     }
 
     private struct ResolvedSource {
         let url: String
+        let host: String
         let credentials: Credentials?
     }
 }

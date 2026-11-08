@@ -813,9 +813,7 @@ private final class CameraPixelBufferView: NSView {
         case .cancelledDueToFlush:
             recordRendererFailure("cancelled_due_to_flush")
         case let .cancelledDueToFlushRequiredToResume(reason):
-            recordRendererFailure(
-                "flush_required=\(reason.map(String.init(describing:)) ?? "unspecified")"
-            )
+            recordRendererFailure("flush_required=\(reason)")
         case let .cancelledDueToError(error):
             recordRendererFailure("error=\(error)")
         @unknown default:
