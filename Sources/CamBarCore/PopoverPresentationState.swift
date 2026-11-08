@@ -17,11 +17,22 @@ public struct PopoverPresentationState: Equatable, Sendable {
     public private(set) var lastIntentTimestamp = -Double.infinity
     public private(set) var presentationID: UInt64 = 0
     private var reopenRequestedDuringClosing = false
+    private var lastOutsideClickCloseTimestamp = -Double.infinity
+
+    /// Mouse-down to mouse-up of one click on the menu bar icon.
+    public static let sameClickInterval = 0.6
 
     public init() {}
 
     public mutating func toggle(at timestamp: Double) -> Command {
         guard accept(timestamp) else { return .none }
+        // The outside-click watcher can see the mouse-down of a click on the
+        // icon itself, for example the icon's copy on another display's menu
+        // bar, and close first. That click's mouse-up must not reopen.
+        if !wantsVisible, timestamp - lastOutsideClickCloseTimestamp <= Self.sameClickInterval {
+            lastOutsideClickCloseTimestamp = -.infinity
+            return .none
+        }
         wantsVisible.toggle()
         reopenRequestedDuringClosing = phase == .closing && wantsVisible
         return reconcile()
@@ -34,8 +45,11 @@ public struct PopoverPresentationState: Equatable, Sendable {
         return reconcile()
     }
 
-    public mutating func requestClose(at timestamp: Double) -> Command {
+    public mutating func requestClose(at timestamp: Double, fromOutsideClick: Bool = false) -> Command {
         guard accept(timestamp) else { return .none }
+        if fromOutsideClick, wantsVisible {
+            lastOutsideClickCloseTimestamp = timestamp
+        }
         wantsVisible = false
         reopenRequestedDuringClosing = false
         return reconcile()

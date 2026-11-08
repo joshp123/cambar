@@ -51,6 +51,20 @@ final class CamBarTests: XCTestCase {
         XCTAssertFalse(state.wantsVisible)
     }
 
+    func testIconClickSeenAsOutsideClickClosesInsteadOfReopening() {
+        var state = PopoverPresentationState()
+        XCTAssertEqual(state.toggle(at: 1), .show)
+        XCTAssertEqual(state.didShow(), .none)
+        // Mouse-down on the icon's copy on another display: watcher closes.
+        XCTAssertEqual(state.requestClose(at: 5.00, fromOutsideClick: true), .close)
+        XCTAssertEqual(state.didClose(), .none)
+        // Mouse-up of the same click reaches the icon: stays closed.
+        XCTAssertEqual(state.toggle(at: 5.12), .none)
+        XCTAssertFalse(state.wantsVisible)
+        // A later, separate click opens it.
+        XCTAssertEqual(state.toggle(at: 6.5), .show)
+    }
+
     func testPopoverOutsideCloseCannotReopenItself() {
         var state = PopoverPresentationState()
 

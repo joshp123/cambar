@@ -185,7 +185,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
                 return
             }
         }
-        requestPopoverClose(reason: "outside_click", at: timestamp)
+        let statusFrame = statusItem.button.flatMap { button in
+            button.window.map { $0.convertToScreen(button.convert(button.bounds, to: nil)) }
+        }
+        requestPopoverClose(
+            reason: "outside_click",
+            at: timestamp,
+            fromOutsideClick: true,
+            detail: "point=\(Int(screenPoint.x)),\(Int(screenPoint.y)) event_window=\(windowNumber) status_frame=\(statusFrame.map { NSStringFromRect($0) } ?? "none") status_window=\(statusItem.button?.window?.windowNumber ?? 0) screens=\(NSScreen.screens.count)"
+        )
     }
 
     private func stopMonitoringOutsideClicks() {
@@ -247,16 +255,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         NSApp.terminate(nil)
     }
 
-    private func requestPopoverClose(reason: String, at timestamp: TimeInterval? = nil) {
+    private func requestPopoverClose(
+        reason: String,
+        at timestamp: TimeInterval? = nil,
+        fromOutsideClick: Bool = false,
+        detail: String? = nil
+    ) {
         let command = popoverPresentation.requestClose(
-            at: timestamp ?? NSApp.currentEvent?.timestamp ?? ProcessInfo.processInfo.systemUptime
+            at: timestamp ?? NSApp.currentEvent?.timestamp ?? ProcessInfo.processInfo.systemUptime,
+            fromOutsideClick: fromOutsideClick
         )
         DirectStreamTelemetry.record(
             component: "app",
             event: "menu_close_requested",
             surface: "menu",
             openID: activeOpenIntent?.id ?? pendingOpenIntent?.id,
-            detail: "reason=\(reason) state=\(popoverPresentation.phase)"
+            detail: "reason=\(reason) state=\(popoverPresentation.phase)\(detail.map { " " + $0 } ?? "")"
         )
         apply(command)
     }
