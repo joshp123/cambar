@@ -18,11 +18,16 @@ Purpose: one-stop shop for agents to develop + debug CamBar fast.
 - Route (`Sources/CamBar/CameraRoute.swift`), chosen at the start of every
   session:
   - direct over the home network when an interface is on the camera's subnet
-    and the device answering there presents the camera's HTTPS certificate.
-    The certificate is learned only through Tailscale, the one authenticated
-    path, and stored in UserDefaults (`cameraCertificateSHA256.<host>`)
+    and the device answering there presents the camera's HTTPS certificate
+    and completes a TLS handshake with it, which proves it holds the camera's
+    private key. The certificate is learned only through Tailscale, the one
+    authenticated path, and stored in UserDefaults
+    (`cameraCertificateSHA256.<host>`); learning or relearning it switches a
+    Tailscale session to direct at once
   - otherwise through Tailscale, pinned to the `utun` interface, so a hotel or
     Airbnb network that reuses 192.168.1.0/24 never receives the camera login
+  - with neither, CamBar does not connect (`route_chosen route=unavailable`).
+    `CameraRoutePolicy` in CamBarCore is this rule, with tests
   - a network change is acted on only after it settles for 2 s, and only if the
     route changed or there is no working session; flapping interfaces never cut
     a working stream

@@ -391,6 +391,7 @@ final class CameraStreamController {
 private actor CameraStreamWorker {
     private enum StreamFailure: Error, CustomStringConvertible {
         case invalidSource
+        case noTrustedRoute(String)
         case videoMissing
         case unsupportedCodec
         case streamEnded
@@ -398,6 +399,7 @@ private actor CameraStreamWorker {
         var description: String {
             switch self {
             case .invalidSource: "invalid RTSP source"
+            case let .noTrustedRoute(reason): "not connecting: \(reason)"
             case .videoMissing: "RTSP session has no video stream"
             case .unsupportedCodec: "camera stream is neither H.264 nor H.265"
             case .streamEnded: "RTSP frame stream ended"
@@ -577,11 +579,14 @@ private actor CameraStreamWorker {
         await activeSession?.abort()
     }
 
-    /// A settled network change. Reconnect only when the route to the camera
-    /// changed (arriving home, leaving it) or when there is no working
-    /// session; then main gets another chance too.
+    /// A settled network change. Main gets another chance, and the session
+    /// reconnects only if the route to the camera changed or none is working.
     func networkChanged() async {
         fallbackSince = nil
+        await reassessRoute(trigger: "network changed")
+    }
+
+    private func reassessRoute(trigger: String) async {
         guard let activeRoute, activeSession != nil, let host = Self.resolveSource(mainSourceURL)?.host else {
             skipNextBackoff = true
             failureCount = 0
@@ -589,10 +594,20 @@ private actor CameraStreamWorker {
             return
         }
         let route = await CameraRoute.choose(host: host, interfaces: pathMonitor.currentPath.availableInterfaces)
-        let routeChanged = route.kind != activeRoute.kind || route.interface?.name != activeRoute.interface?.name
+        let routeChanged = route.decision != activeRoute.decision || route.interface?.name != activeRoute.interface?.name
         guard routeChanged || activeGenerationIsFallback else { return }
-        pendingStreamSwitch = routeChanged ? "network changed, route now \(route)" : "network changed, trying main"
+        pendingStreamSwitch = routeChanged ? "\(trigger), route now \(route)" : "\(trigger), trying main"
         await activeSession?.abort()
+    }
+
+    /// Learns or refreshes the camera certificate through Tailscale; a newly
+    /// learned one may allow the direct route at once.
+    private func learnCameraCertificate(host: String, over tailscale: NWInterface) async {
+        guard let changed = await CameraIdentity.learn(host: host, over: tailscale) else { return }
+        certificateLearnedThisLaunch = true
+        if changed {
+            await reassessRoute(trigger: "camera certificate learned")
+        }
     }
 
     func setViewed(_ viewed: Bool, commandID: UInt64) async {
@@ -723,6 +738,9 @@ private actor CameraStreamWorker {
         )
         activeRoute = route
         rtspConnected = false
+        guard route.decision != .unavailable else {
+            throw StreamFailure.noTrustedRoute(route.reason)
+        }
         DirectStreamTelemetry.record(
             component: "route",
             event: "route_chosen",
@@ -753,10 +771,9 @@ private actor CameraStreamWorker {
         guard let video = description.video else { throw StreamFailure.videoMissing }
         await session.setMinimumReadBytes(minimumReadBytes)
         rtspConnected = true
-        if route.kind == .tailscale, let tailscale = route.interface,
-           !certificateLearnedThisLaunch || route.reason.contains("not the camera") {
-            certificateLearnedThisLaunch = true
-            Task { await CameraIdentity.learn(host: source.host, over: tailscale) }
+        if route.decision == .tailscale, let tailscale = route.interface,
+           !certificateLearnedThisLaunch || route.localCheck == .otherDevice {
+            Task { await self.learnCameraCertificate(host: source.host, over: tailscale) }
         }
         DirectStreamTelemetry.record(
             component: "rtsp",

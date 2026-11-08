@@ -421,6 +421,19 @@ final class CamBarTests: XCTestCase {
         XCTAssertFalse(mobileNetwork.contains("192.168.1.249"))
     }
 
+    func testCameraLoginGoesOnlyToAProvenCameraOrThroughTailscale() {
+        let checks: [CameraRoutePolicy.LocalCheck] = [
+            .notOnLocalNetwork, .certificateNotLearned, .otherDevice, .noAnswer,
+        ]
+        for check in checks {
+            XCTAssertEqual(CameraRoutePolicy.decide(hostIsIPv4Address: true, localCheck: check, tailscaleConnected: true).decision, .tailscale)
+            XCTAssertEqual(CameraRoutePolicy.decide(hostIsIPv4Address: true, localCheck: check, tailscaleConnected: false).decision, .unavailable)
+        }
+        XCTAssertEqual(CameraRoutePolicy.decide(hostIsIPv4Address: true, localCheck: .proven, tailscaleConnected: false).decision, .direct)
+        XCTAssertEqual(CameraRoutePolicy.decide(hostIsIPv4Address: true, localCheck: .proven, tailscaleConnected: true).decision, .direct)
+        XCTAssertEqual(CameraRoutePolicy.decide(hostIsIPv4Address: false, localCheck: .notOnLocalNetwork, tailscaleConnected: false).decision, .systemRouting)
+    }
+
     func testTailscaleAddressesAreRecognised() {
         XCTAssertTrue(TailscaleAddress.isTailscale(IPv4Network(address: IPv4Network.parse("100.117.45.44")!, prefixLength: 32)))
         XCTAssertFalse(TailscaleAddress.isTailscale(IPv4Network(address: IPv4Network.parse("100.128.0.1")!, prefixLength: 32)))
