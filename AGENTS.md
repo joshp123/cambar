@@ -191,8 +191,10 @@ reruns it; results in `~/cambar-quality/runs/`). At night 4096 beat the old
 H.264 at 6144, but in daylight on 31 Oct it fell short in every region, worst
 on the left-hand texture. H.265 at 6144 beat the old H.264 everywhere by day
 (SSIM 0.992 vs 0.985) at about the same measured bitrate (4.5 vs 4.3 Mbit/s).
-Moving areas are masked out, so motion is not scored. Sub: H.265, 1280x720, 25 fps, VBR max 1024 kbit/s, keyframe every
-2 s. Keep Smart Codec off: it stretches keyframe spacing and slows first frame.
+Moving areas are masked out, so motion is not scored. Sub: H.264 Main, 1280x720, 25 fps, VBR max 1024 kbit/s, keyframe every
+2 s, so Apple Home's live view can use it without conversion. Its averaged
+daylight picture scored at least as close to the main stream as the H.265
+substream did (SSIM 0.83 vs 0.79), with the same visible detail. Keep Smart Codec off: it stretches keyframe spacing and slows first frame.
 
 ## Fast failure classification
 Run in order:
